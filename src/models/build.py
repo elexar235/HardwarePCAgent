@@ -8,7 +8,7 @@ from src.models.hardware import CPU, Motherboard, GPU, RAM, Storage, PSU, Cooler
 class PCBuild(BaseModel):
     cpu: CPU
     motherboard: Motherboard
-    gpu: GPU
+    gpu: Optional[GPU] = None  # None indicates usage of CPU integrated graphics
     ram: RAM
     storage: Storage
     psu: PSU
@@ -20,12 +20,13 @@ class PCBuild(BaseModel):
         price = (
             self.cpu.price_usd
             + self.motherboard.price_usd
-            + self.gpu.price_usd
             + self.ram.price_usd
             + self.storage.price_usd
             + self.psu.price_usd
             + self.case.price_usd
         )
+        if self.gpu:
+            price += self.gpu.price_usd
         if self.cooler:
             price += self.cooler.price_usd
         return price
@@ -33,8 +34,9 @@ class PCBuild(BaseModel):
     @property
     def estimated_peak_power_w(self) -> int:
         """Estimated maximum system power draw under heavy load."""
-        base_system_draw = 60  # fans, motherboard, drives, peripherals
-        return self.cpu.tdp_w + self.gpu.tdp_w + base_system_draw
+        base_system_draw = 50  # fans, motherboard, drives, peripherals
+        gpu_draw = self.gpu.tdp_w if self.gpu else 0
+        return self.cpu.tdp_w + gpu_draw + base_system_draw
 
 
 class CompatibilityIssue(BaseModel):

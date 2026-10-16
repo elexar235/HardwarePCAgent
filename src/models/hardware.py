@@ -22,6 +22,7 @@ class CPU(HardwareItem):
     threads: int
     tdp_w: int
     supports_ram: List[RAMType]
+    has_integrated_gpu: bool = False
     benchmark_score: int = Field(
         ..., description="Relative CPU performance score (higher is better)"
     )
