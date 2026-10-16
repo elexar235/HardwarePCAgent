@@ -25,7 +25,8 @@ def valid_am5_build():
             threads=12,
             tdp_w=65,
             supports_ram=["DDR5"],
-            price_usd=155,
+            has_integrated_gpu=False,
+            price_usd=145,
             benchmark_score=16000,
         ),
         motherboard=Motherboard(
@@ -38,19 +39,19 @@ def valid_am5_build():
             form_factor="Micro-ATX",
             pcie_version="4.0",
             m2_slots_count=2,
-            price_usd=125,
+            price_usd=119,
         ),
         gpu=GPU(
-            id="gpu-rtx4070s-12g",
-            name="Palit GeForce RTX 4070 SUPER Dual 12GB",
-            brand="Palit",
-            chip="RTX 4070 Super",
-            vram_gb=12,
-            tdp_w=220,
-            recommended_psu_w=650,
-            length_mm=269,
-            price_usd=599,
-            benchmark_score=21000,
+            id="gpu-rx9060xt-16g",
+            name="Sapphire PULSE AMD Radeon RX 9060 XT 16GB",
+            brand="Sapphire",
+            chip="RX 9060 XT",
+            vram_gb=16,
+            tdp_w=160,
+            recommended_psu_w=550,
+            length_mm=250,
+            price_usd=369,
+            benchmark_score=16500,
         ),
         ram=RAM(
             id="ram-32g-d5-6000",
@@ -60,7 +61,7 @@ def valid_am5_build():
             capacity_gb=32,
             speed_mhz=6000,
             modules_count=2,
-            price_usd=105,
+            price_usd=279,
         ),
         storage=Storage(
             id="ssd-1tb-nv2",
@@ -69,16 +70,16 @@ def valid_am5_build():
             storage_type="NVMe M.2 SSD",
             capacity_gb=1000,
             read_speed_mb_s=3500,
-            price_usd=58,
+            price_usd=55,
         ),
         psu=PSU(
-            id="psu-750w-gold",
-            name="Montech Century 750W Gold",
-            brand="Montech",
-            wattage_w=750,
-            certification="Gold",
-            is_modular=True,
-            price_usd=85,
+            id="psu-650w-bronze",
+            name="DeepCool PK650D 650W Bronze",
+            brand="DeepCool",
+            wattage_w=650,
+            certification="Bronze",
+            is_modular=False,
+            price_usd=55,
         ),
         case=Case(
             id="case-montech-air100",
@@ -93,7 +94,7 @@ def valid_am5_build():
             id="cooler-ag400",
             name="DeepCool AG400",
             brand="DeepCool",
-            supported_sockets=["AM4", "AM5", "LGA1700"],
+            supported_sockets=["AM4", "AM5", "LGA1700", "LGA1851"],
             max_tdp_w=220,
             height_mm=150,
             price_usd=22,
@@ -107,10 +108,33 @@ def test_valid_build_passes(valid_am5_build: PCBuild):
     assert len(result.issues) == 0
 
 
+def test_igpu_office_build_passes(valid_am5_build: PCBuild):
+    # System with NO discrete GPU, but CPU has integrated graphics
+    office_build = valid_am5_build.model_copy(deep=True)
+    office_build.gpu = None
+    office_build.cpu.has_integrated_gpu = True
+    office_build.cpu.name = "AMD Ryzen 5 8500G (Radeon 740M iGPU)"
+
+    result = validate_pc_build(office_build)
+    assert result.is_compatible is True
+    assert len(result.issues) == 0
+
+
+def test_missing_video_output_fails(valid_am5_build: PCBuild):
+    # System with NO discrete GPU and CPU has NO integrated graphics
+    headless_build = valid_am5_build.model_copy(deep=True)
+    headless_build.gpu = None
+    headless_build.cpu.has_integrated_gpu = False
+
+    result = validate_pc_build(headless_build)
+    assert result.is_compatible is False
+    assert any("No Video Output" in issue.rule_name for issue in result.issues)
+
+
 def test_socket_mismatch_fails(valid_am5_build: PCBuild):
     invalid_build = valid_am5_build.model_copy(deep=True)
-    invalid_build.motherboard.socket = "LGA1700"
-    invalid_build.motherboard.name = "Intel B760 Board"
+    invalid_build.motherboard.socket = "LGA1851"
+    invalid_build.motherboard.name = "MSI Z890 Motherboard"
 
     result = validate_pc_build(invalid_build)
     assert result.is_compatible is False
@@ -138,7 +162,7 @@ def test_gpu_too_long_fails(valid_am5_build: PCBuild):
 
 def test_psu_underpowered_fails(valid_am5_build: PCBuild):
     invalid_build = valid_am5_build.model_copy(deep=True)
-    invalid_build.psu.wattage_w = 300
+    invalid_build.psu.wattage_w = 200
 
     result = validate_pc_build(invalid_build)
     assert result.is_compatible is False
