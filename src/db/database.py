@@ -56,6 +56,7 @@ class HardwareDatabase:
                     threads INTEGER,
                     tdp_w INTEGER,
                     supports_ram TEXT,
+                    has_integrated_gpu BOOLEAN,
                     price_usd INTEGER,
                     benchmark_score INTEGER
                 )
@@ -171,7 +172,7 @@ class HardwareDatabase:
         for item in CPUS_SEED:
             cur.execute(
                 """
-                INSERT INTO cpus VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                INSERT INTO cpus VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
                 (
                     item["id"],
@@ -182,6 +183,7 @@ class HardwareDatabase:
                     item["threads"],
                     item["tdp_w"],
                     json.dumps(item["supports_ram"]),
+                    item.get("has_integrated_gpu", False),
                     item["price_usd"],
                     item["benchmark_score"],
                 ),
@@ -326,6 +328,7 @@ class HardwareDatabase:
                     threads=row["threads"],
                     tdp_w=row["tdp_w"],
                     supports_ram=json.loads(row["supports_ram"]),
+                    has_integrated_gpu=bool(row["has_integrated_gpu"]),
                     price_usd=row["price_usd"],
                     benchmark_score=row["benchmark_score"],
                 )
