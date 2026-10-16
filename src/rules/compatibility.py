@@ -8,6 +8,26 @@ from typing import List
 from src.models.build import CompatibilityIssue, PCBuild, ValidationResult
 
 
+def check_display_output(build: PCBuild) -> List[CompatibilityIssue]:
+    """Ensure system has either a discrete GPU or an integrated CPU graphics unit."""
+    issues = []
+    if build.gpu is None and not build.cpu.has_integrated_gpu:
+        issues.append(
+            CompatibilityIssue(
+                severity="error",
+                rule_name="No Video Output",
+                component_a=f"{build.cpu.name} (No iGPU)",
+                component_b="Discrete GPU (Missing)",
+                message=(
+                    f"No display output available! CPU '{build.cpu.name}' does not have integrated graphics, "
+                    "and no dedicated graphics card (GPU) was included in the build."
+                ),
+                suggested_fix="Add a dedicated GPU or switch to a processor with built-in graphics.",
+            )
+        )
+    return issues
+
+
 def check_socket_compatibility(build: PCBuild) -> List[CompatibilityIssue]:
     issues = []
     if build.cpu.socket != build.motherboard.socket:
@@ -68,9 +88,11 @@ def check_ram_compatibility(build: PCBuild) -> List[CompatibilityIssue]:
 def check_power_supply(build: PCBuild) -> List[CompatibilityIssue]:
     issues = []
     peak_draw = build.estimated_peak_power_w
-    recommended_min_w = max(
-        build.gpu.recommended_psu_w, int(peak_draw * 1.25)
-    )
+
+    if build.gpu:
+        recommended_min_w = max(build.gpu.recommended_psu_w, int(peak_draw * 1.25))
+    else:
+        recommended_min_w = int(peak_draw * 1.3)
 
     if build.psu.wattage_w < peak_draw:
         issues.append(
@@ -87,17 +109,18 @@ def check_power_supply(build: PCBuild) -> List[CompatibilityIssue]:
             )
         )
     elif build.psu.wattage_w < recommended_min_w:
+        target_name = build.gpu.name if build.gpu else "System Configuration"
         issues.append(
             CompatibilityIssue(
                 severity="warning",
                 rule_name="Low Power Headroom",
                 component_a=f"{build.psu.name} ({build.psu.wattage_w}W)",
-                component_b=f"{build.gpu.name} (Recommended: {build.gpu.recommended_psu_w}W)",
+                component_b=target_name,
                 message=(
                     f"PSU wattage ({build.psu.wattage_w}W) is lower than recommended headroom "
-                    f"({recommended_min_w}W) for GPU '{build.gpu.name}'. May cause instability under transient spikes."
+                    f"({recommended_min_w}W). May reduce PSU lifespan under heavy load."
                 ),
-                suggested_fix=f"Consider a {recommended_min_w}W or higher Gold-rated PSU.",
+                suggested_fix=f"Consider a {recommended_min_w}W or higher rated PSU.",
             )
         )
     return issues
@@ -105,8 +128,8 @@ def check_power_supply(build: PCBuild) -> List[CompatibilityIssue]:
 
 def check_physical_clearance(build: PCBuild) -> List[CompatibilityIssue]:
     issues = []
-    # 1. GPU length vs Case clearance
-    if build.gpu.length_mm > build.case.max_gpu_length_mm:
+    # 1. GPU length vs Case clearance (if discrete GPU is installed)
+    if build.gpu and build.gpu.length_mm > build.case.max_gpu_length_mm:
         issues.append(
             CompatibilityIssue(
                 severity="error",
@@ -193,7 +216,9 @@ def check_cooler_compatibility(build: PCBuild) -> List[CompatibilityIssue]:
 
 def check_balance_bottleneck(build: PCBuild) -> List[CompatibilityIssue]:
     issues = []
-    # Bench ratio heuristic: GPU score vs CPU score
+    if not build.gpu:
+        return issues
+
     cpu_score = build.cpu.benchmark_score
     gpu_score = build.gpu.benchmark_score
 
@@ -208,7 +233,7 @@ def check_balance_bottleneck(build: PCBuild) -> List[CompatibilityIssue]:
                 component_b=f"{build.gpu.name} (Score: {gpu_score})",
                 message=(
                     f"The CPU '{build.cpu.name}' is significantly underpowered for GPU '{build.gpu.name}'. "
-                    f"In 1080p and high-framerate titles, the CPU will bottleneck the graphics card."
+                    "In CPU-bound titles, the CPU will bottleneck the graphics card."
                 ),
                 suggested_fix="Upgrade to a faster CPU to unlock the full potential of your GPU.",
             )
@@ -221,8 +246,8 @@ def check_balance_bottleneck(build: PCBuild) -> List[CompatibilityIssue]:
                 component_a=f"{build.cpu.name} (Score: {cpu_score})",
                 component_b=f"{build.gpu.name} (Score: {gpu_score})",
                 message=(
-                    f"The CPU '{build.cpu.name}' is disproportionately expensive compared to the GPU '{build.gpu.name}'. "
-                    f"For gaming builds, consider spending more on the GPU and choosing a balanced CPU."
+                    f"The CPU '{build.cpu.name}' is disproportionately expensive compared to GPU '{build.gpu.name}'. "
+                    "For dedicated gaming builds, prioritize a higher GPU tier.",
                 ),
                 suggested_fix="Rebalance budget: step down CPU tier and step up GPU tier.",
             )
@@ -234,6 +259,7 @@ def validate_pc_build(build: PCBuild) -> ValidationResult:
     """Run full deterministic validation suite against a PC build."""
     all_issues: List[CompatibilityIssue] = []
 
+    all_issues.extend(check_display_output(build))
     all_issues.extend(check_socket_compatibility(build))
     all_issues.extend(check_ram_compatibility(build))
     all_issues.extend(check_power_supply(build))
