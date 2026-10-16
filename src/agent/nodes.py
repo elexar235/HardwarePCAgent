@@ -271,10 +271,14 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
 
     # 4. Select Storage
     storages = db.list_storages()
-    if profile == "office":
-        storage = storages[-1]  # 500GB NVMe budget SSD ($38)
-    elif budget >= 1800 and len(storages) >= 3:
-        storage = storages[2]  # 2TB high performance
+    if profile == "office" or budget <= 600:
+        storage = storages[0]  # The most affordable NVMe drive ($38 for 500GB)
+    elif budget >= 2000:
+        high_cap = [s for s in storages if s.capacity_gb >= 2000]
+        storage = high_cap[0] if high_cap else storages[-1]
+    elif budget >= 1200:
+        one_tb = [s for s in storages if s.capacity_gb == 1000]
+        storage = one_tb[-1] if one_tb else storages[0]
     else:
         storage = storages[0]
 

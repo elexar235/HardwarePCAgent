@@ -1,6 +1,13 @@
 """Interactive CLI runner for the PC Builder Agent."""
 
 import sys
+from pathlib import Path
+
+# Ensure project root is in sys.path
+ROOT_DIR = Path(__file__).resolve().parent.parent
+if str(ROOT_DIR) not in sys.path:
+    sys.path.insert(0, str(ROOT_DIR))
+
 from rich.console import Console
 from rich.panel import Panel
 from rich.markdown import Markdown
@@ -51,7 +58,7 @@ def main():
 
     # Interactive mode
     console.print("[yellow]Enter your PC requirements (or 'exit' to quit):[/yellow]")
-    console.print("[dim]Example: 'Build a PC for Cyberpunk 2077 and CS2 at 1440p, budget $1300, light video editing'[/dim]\n")
+    console.print("[dim]Example: 'Build a PC for Cyberpunk 2077 and CS2 at 1440p, budget $1300'[/dim]\n")
 
     while True:
         try:
