@@ -1,5 +1,6 @@
 """Interactive CLI runner for the PC Builder Agent."""
 
+import io
 import sys
 from pathlib import Path
 
@@ -7,6 +8,12 @@ from pathlib import Path
 ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
+
+# Force UTF-8 output on Windows to support emoji / box-drawing characters
+if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stderr.encoding and sys.stderr.encoding.lower() != "utf-8":
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 from rich.console import Console
 from rich.panel import Panel

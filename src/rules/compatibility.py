@@ -247,7 +247,7 @@ def check_balance_bottleneck(build: PCBuild) -> List[CompatibilityIssue]:
                 component_b=f"{build.gpu.name} (Score: {gpu_score})",
                 message=(
                     f"The CPU '{build.cpu.name}' is disproportionately expensive compared to GPU '{build.gpu.name}'. "
-                    "For dedicated gaming builds, prioritize a higher GPU tier.",
+                    "For dedicated gaming builds, prioritize a higher GPU tier."
                 ),
                 suggested_fix="Rebalance budget: step down CPU tier and step up GPU tier.",
             )

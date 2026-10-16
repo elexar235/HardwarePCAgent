@@ -8,8 +8,8 @@ class UserRequirements(BaseModel):
     budget_usd: Optional[int] = Field(
         None, description="Maximum total budget in USD"
     )
-    resolution: Literal["1080p", "1440p", "4k"] = Field(
-        "1440p", description="Target gaming display resolution"
+    resolution: Optional[Literal["1080p", "1440p", "4k"]] = Field(
+        None, description="Target gaming display resolution (only for gaming workloads)"
     )
     target_fps: int = Field(60, description="Desired minimum average frame rate")
     target_games: List[str] = Field(

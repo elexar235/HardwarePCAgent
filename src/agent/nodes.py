@@ -57,8 +57,8 @@ def _heuristic_parse_requirements(query: str) -> UserRequirements:
             if num_match:
                 budget = int(num_match.group(1))
 
-    # Resolution
-    res = "1440p"
+    # Resolution (None unless explicitly specified by the user)
+    res = None
     if "4k" in q or "3840" in q or "uhd" in q:
         res = "4k"
     elif "1080p" in q or "fhd" in q or "full hd" in q:
@@ -142,14 +142,18 @@ def _determine_workload_profile(req: UserRequirements) -> str:
             "daw",
         ]
     )
-    is_gaming = len(games) > 0 or req.resolution in ["1440p", "4k"]
     is_office = any(k in tasks for k in ["office", "surfing", "browser", "web surfing"])
+    is_gaming = len(games) > 0 or (req.resolution is not None)
 
     if has_heavy_gpu_tasks:
         return "ai_3d"
     if has_productivity and not is_gaming:
         return "productivity"
-    if is_office or (not is_gaming and not has_productivity and (req.budget_usd or 0) <= 600):
+    if is_office:
+        return "office"
+    if is_gaming:
+        return "gaming"
+    if (req.budget_usd or 0) <= 600 and not has_productivity and not has_heavy_gpu_tasks:
         return "office"
     return "gaming"
 
@@ -189,10 +193,24 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
     profile = _determine_workload_profile(requirements)
 
     over_budget_penalty = 0
-    if any("exceeds" in f.lower() for f in feedback):
-        over_budget_penalty = 80 * max(1, iteration)
+    overrun_amount = 0
+    for f in feedback:
+        m = re.search(r"exceeds budget by \$([0-9,]+)", f)
+        if m:
+            overrun_amount = max(overrun_amount, int(m.group(1).replace(",", "")))
+
+    if overrun_amount > 0:
+        # Penalize by at least the overrun plus a small safety step per iteration
+        over_budget_penalty = overrun_amount + 30 * iteration
+    elif any("exceeds" in f.lower() for f in feedback):
+        over_budget_penalty = 60 * max(1, iteration)
 
     adjusted_budget = max(350, budget - over_budget_penalty)
+
+    all_cpus = db.list_cpus()
+    cheapest_cpu = min(all_cpus, key=lambda c: c.price_usd)
+    all_gpus = db.list_gpus()
+    cheapest_gpu = min(all_gpus, key=lambda g: g.price_usd)
 
     # 1. Determine CPU & GPU Allocation based on Profile
     gpu: Optional[GPU] = None
@@ -201,45 +219,67 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
         # Office / Web Surfing: prioritize CPU with integrated GPU (0$ discrete GPU!)
         target_cpu_budget = int(adjusted_budget * 0.40)
         target_ram_gb = 16
-        # Find CPUs with integrated graphics
         igpu_cpus = [c for c in db.list_cpus(max_price=target_cpu_budget) if c.has_integrated_gpu]
         if not igpu_cpus:
-            igpu_cpus = [c for c in db.list_cpus() if c.has_integrated_gpu]
-        cpu = igpu_cpus[0] if igpu_cpus else db.list_cpus()[-1]
-        gpu = None  # No discrete GPU needed!
+            all_igpu = [c for c in all_cpus if c.has_integrated_gpu]
+            igpu_cpus = sorted(all_igpu, key=lambda c: c.price_usd)
+        cpu = igpu_cpus[0] if igpu_cpus else cheapest_cpu
+        gpu = None
 
     elif profile == "productivity":
         target_cpu_budget = int(adjusted_budget * 0.40)
-        target_gpu_budget = int(adjusted_budget * 0.18)
-        target_ram_gb = 64 if budget >= 1600 else 32
+        target_gpu_budget = int(adjusted_budget * 0.22)
+        target_ram_gb = 64 if adjusted_budget >= 1600 else 32
 
-        # CPU first
         available_cpus = db.list_cpus(max_price=target_cpu_budget)
-        cpu = available_cpus[0] if available_cpus else db.list_cpus()[0]
+        cpu = available_cpus[0] if available_cpus else cheapest_cpu
 
-        # Discrete GPU (entry-to-mid for multi-monitor / video decoding)
         available_gpus = db.list_gpus(max_price=target_gpu_budget)
-        gpu = available_gpus[0] if available_gpus else db.list_gpus()[-1]
+        gpu = available_gpus[0] if available_gpus else cheapest_gpu
 
     elif profile == "ai_3d":
         target_gpu_budget = int(adjusted_budget * 0.52)
         target_cpu_budget = int(adjusted_budget * 0.20)
-        target_ram_gb = 64 if budget >= 2000 else 32
+        target_ram_gb = 64 if adjusted_budget >= 2000 else 32
 
         available_gpus = db.list_gpus(max_price=target_gpu_budget)
-        high_vram_gpus = [g for g in available_gpus if g.vram_gb >= 16]
-        gpu = high_vram_gpus[0] if high_vram_gpus else (available_gpus[0] if available_gpus else db.list_gpus()[0])
+        # For AI/ML workloads, prioritize NVIDIA GPUs (CUDA, TensorRT, PyTorch/Ollama)
+        nvidia_gpus = [
+            g for g in available_gpus
+            if g.brand.lower() == "nvidia" or "rtx" in g.name.lower() or "geforce" in g.name.lower()
+        ]
+        nv_16g = [g for g in nvidia_gpus if g.vram_gb >= 16]
+        nv_12g = [g for g in nvidia_gpus if g.vram_gb >= 12]
+        amd_16g = [g for g in available_gpus if g.vram_gb >= 16]
 
+        if nv_16g:
+            gpu = nv_16g[0]
+        elif nv_12g:
+            gpu = nv_12g[0]
+        elif amd_16g:
+            gpu = amd_16g[0]
+        elif nvidia_gpus:
+            gpu = nvidia_gpus[0]
+        elif available_gpus:
+            gpu = available_gpus[0]
+        else:
+            gpu = cheapest_gpu
+
+        # For AI builds under $1400, prefer DDR4-capable CPU to keep total within budget
         available_cpus = db.list_cpus(max_price=target_cpu_budget)
-        cpu = available_cpus[0] if available_cpus else db.list_cpus()[0]
+        if adjusted_budget < 1400:
+            ddr4_cpus = [c for c in available_cpus if "DDR4" in c.supports_ram]
+            cpu = ddr4_cpus[0] if ddr4_cpus else (available_cpus[0] if available_cpus else cheapest_cpu)
+        else:
+            cpu = available_cpus[0] if available_cpus else cheapest_cpu
 
     else:  # gaming
         target_gpu_budget = int(adjusted_budget * 0.46)
         target_cpu_budget = int(adjusted_budget * 0.22)
-        target_ram_gb = 32 if budget >= 1200 else 16
+        target_ram_gb = 32 if adjusted_budget >= 1200 else 16
 
         available_gpus = db.list_gpus(max_price=target_gpu_budget)
-        gpu = available_gpus[0] if available_gpus else db.list_gpus()[-1]
+        gpu = available_gpus[0] if available_gpus else cheapest_gpu
 
         if requirements.resolution == "4k":
             high_vram_gpus = [g for g in available_gpus if g.vram_gb >= 16]
@@ -248,11 +288,11 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
 
         available_cpus = db.list_cpus(max_price=target_cpu_budget)
         modern_cpus = [c for c in available_cpus if c.socket in ["AM5", "LGA1851"]]
-        if budget >= 900 and modern_cpus:
+        if adjusted_budget >= 900 and modern_cpus:
             x3d_cpus = [c for c in modern_cpus if "X3D" in c.name]
             cpu = x3d_cpus[0] if x3d_cpus else modern_cpus[0]
         else:
-            cpu = available_cpus[0] if available_cpus else db.list_cpus()[0]
+            cpu = available_cpus[0] if available_cpus else cheapest_cpu
 
     # 2. Select Motherboard strictly matching CPU socket
     target_ram_type = "DDR5" if "DDR5" in cpu.supports_ram and cpu.socket in ["AM5", "LGA1851"] else "DDR4"
@@ -271,20 +311,23 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
 
     # 4. Select Storage
     storages = db.list_storages()
-    if profile == "office" or budget <= 600:
+    if profile == "office" or adjusted_budget <= 600:
         storage = storages[0]  # The most affordable NVMe drive ($38 for 500GB)
-    elif budget >= 2000:
+    elif adjusted_budget >= 2000:
         high_cap = [s for s in storages if s.capacity_gb >= 2000]
-        storage = high_cap[0] if high_cap else storages[-1]
-    elif budget >= 1200:
+        storage = high_cap[0] if high_cap else storages[0]
+    elif adjusted_budget >= 1400:
         one_tb = [s for s in storages if s.capacity_gb == 1000]
-        storage = one_tb[-1] if one_tb else storages[0]
+        storage = max(one_tb, key=lambda s: s.read_speed_mb_s) if one_tb else storages[0]
+    elif adjusted_budget >= 800:
+        one_tb = [s for s in storages if s.capacity_gb == 1000]
+        storage = one_tb[0] if one_tb else storages[0]
     else:
         storage = storages[0]
 
     # 5. Select PSU based on system load
     gpu_power = gpu.tdp_w if gpu else 0
-    gpu_rec_psu = gpu.recommended_psu_w if gpu else 400
+    gpu_rec_psu = gpu.recommended_psu_w if gpu else (300 if profile == "office" else 400)
     estimated_power = cpu.tdp_w + gpu_power + 50
     min_psu_wattage = max(gpu_rec_psu, int(estimated_power * 1.25))
 
@@ -404,10 +447,22 @@ def explain_build_node(state: AgentState) -> Dict[str, Any]:
     if not build:
         return {"final_response": "Unable to configure a build matching specified constraints."}
 
-    resolution = requirements.resolution if requirements else "1440p"
     budget = requirements.budget_usd if requirements else 0
     profile = _determine_workload_profile(requirements) if requirements else "gaming"
-    fps_estimates = _estimate_game_fps(build.gpu, resolution)
+
+    # Target resolution: only meaningful for gaming workloads
+    resolution = None
+    if profile == "gaming":
+        resolution = requirements.resolution if (requirements and requirements.resolution) else None
+        if not resolution:
+            if budget >= 1800:
+                resolution = "4k"
+            elif budget >= 900:
+                resolution = "1440p"
+            else:
+                resolution = "1080p"
+
+    fps_estimates = _estimate_game_fps(build.gpu, resolution) if (profile == "gaming" and resolution) else {}
 
     status_icon = "✅" if val_result and val_result.is_compatible else "⚠️"
     status_text = "100% Fully Compatible" if val_result and val_result.is_compatible else "Budget/Hardware adjustments needed"
@@ -424,10 +479,16 @@ def explain_build_node(state: AgentState) -> Dict[str, Any]:
     gpu_spec = f"{build.gpu.vram_gb}GB VRAM, {build.gpu.length_mm}mm" if build.gpu else "Shared System Memory"
     gpu_price = f"${build.gpu.price_usd:,}" if build.gpu else "$0 (Included)"
 
+    # Meta header: only show target resolution for gaming
+    if profile == "gaming" and resolution:
+        meta_header = f"**Target Resolution:** `{resolution.upper()}` | **Profile:** `{profile_label}`"
+    else:
+        meta_header = f"**Profile:** `{profile_label}`"
+
     lines = [
         f"## 🖥️ Recommended PC Configuration ({profile_label})",
         "",
-        f"**Target Resolution:** `{resolution.upper()}` | **Profile:** `{profile_label}`",
+        meta_header,
         f"**Compatibility Status:** {status_icon} {status_text} (Optimized in {iterations} iteration{'s' if iterations > 1 else ''})",
         "",
         "### 📦 Selected Components:",
@@ -451,7 +512,43 @@ def explain_build_node(state: AgentState) -> Dict[str, Any]:
         f"⚡ **Estimated Peak Power Draw:** `~{build.estimated_peak_power_w}W` (Headroom: `+{build.psu.wattage_w - build.estimated_peak_power_w}W`)",
     ])
 
-    if fps_estimates:
+    if budget and build.total_price > budget:
+        overrun = build.total_price - budget
+        if profile == "gaming" and resolution:
+            lines.extend([
+                "",
+                f"> ⚠️ **Budget Constraint Notice:** The minimum viable configuration for `{resolution.upper()}` gaming is **${build.total_price:,}**, which exceeds your budget of **${budget:,}** by **${overrun:,}**.",
+                f"> *Feasibility Note:* Gaming at **{resolution.upper()}** requires modern graphics hardware starting at $350+ for the GPU alone. To meet a ${budget} ceiling, consider dropping target resolution to 1080p or increasing budget.",
+            ])
+        else:
+            profile_hints = {
+                "ai_3d": "AI/ML workloads require high-VRAM GPUs which are costly. Consider a lower VRAM tier (e.g. 12GB) or increase the budget.",
+                "productivity": "Workstation builds prioritize multi-core CPU and fast RAM. Consider a lower GPU tier or increasing the budget.",
+                "office": "Consider reducing RAM capacity or choosing a lower-tier storage option.",
+            }
+            hint = profile_hints.get(profile, "Consider adjusting component tiers to fit the budget.")
+            lines.extend([
+                "",
+                f"> ⚠️ **Budget Constraint Notice:** Selected configuration totals **${build.total_price:,}**, exceeding your budget of **${budget:,}** by **${overrun:,}**.",
+                f"> *Suggestion:* {hint}",
+            ])
+
+    # Show AI/LLM capability breakdown for AI workloads
+    if profile == "ai_3d" and build.gpu:
+        vram = build.gpu.vram_gb
+        is_nv = build.gpu.brand.lower() == "nvidia" or "geforce" in build.gpu.name.lower() or "rtx" in build.gpu.name.lower()
+        backend_note = "NVIDIA CUDA & TensorRT (native PyTorch/Ollama/vLLM support)" if is_nv else "DirectML / ROCm"
+        llm_size = "14B" if vram >= 16 else ("8B" if vram >= 12 else "7B" if vram >= 8 else "3B")
+        lines.extend([
+            "",
+            "### 🧠 Estimated AI & Local LLM Capability:",
+            f"- **Compute Engine:** `{build.gpu.name}` ({backend_note})",
+            f"- **VRAM Capacity:** `{vram}GB` — fully offloads models up to ~`{llm_size}` parameters (e.g. Qwen 2.5, Llama 3.1) in 4-bit/8-bit precision",
+            f"- **System Memory:** `{build.ram.capacity_gb}GB {build.ram.ram_type}` provides ample memory for large datasets and CPU-offloaded layers",
+        ])
+
+    # Show gaming benchmarks only when the build is actually targeting gaming
+    if profile == "gaming" and fps_estimates and resolution:
         lines.extend([
             "",
             f"### 🎮 Estimated Gaming Benchmarks ({resolution.upper()} High/Ultra):",
@@ -459,18 +556,34 @@ def explain_build_node(state: AgentState) -> Dict[str, Any]:
         for game, fps in fps_estimates.items():
             lines.append(f"- **{game}:** ~`{fps} FPS`")
 
+    # Workload Rationale tailored to profile
+    if profile == "office":
+        gpu_rationale = "Utilizing cost-effective CPU integrated graphics ($0) to minimize cost, noise, and power draw for web surfing and office applications."
+    elif profile == "ai_3d":
+        backend = "NVIDIA CUDA / Tensor Cores" if (build.gpu and (build.gpu.brand.lower() == "nvidia" or "rtx" in build.gpu.name.lower())) else "High-VRAM Compute"
+        gpu_rationale = f"Dedicated GPU ({build.gpu.name}) selected for {build.gpu.vram_gb}GB VRAM and {backend} for model training and local LLM inference."
+    elif profile == "productivity":
+        gpu_rationale = f"Dedicated graphics ({build.gpu.name}) selected for multi-display productivity and hardware-accelerated video/rendering workflows."
+    else:
+        gpu_rationale = f"Dedicated graphics ({build.gpu.name}) chosen to meet framerate and visual fidelity targets."
+
     lines.extend([
         "",
         "### 🔍 Engineering Rationale:",
-        f"1. **Workload Alignment:** Tailored for `{profile_label}`. "
-        + ("Utilizing cost-effective CPU integrated graphics ($0) to minimize cost and power draw for web surfing and office work." if not build.gpu else f"Dedicated graphics ({build.gpu.name}) chosen to meet visual fidelity targets."),
+        f"1. **Workload Alignment:** Tailored for `{profile_label}`. {gpu_rationale}",
         f"2. **Platform & Socket:** Socket `{build.cpu.socket}` with `{build.ram.ram_type}` delivers optimal efficiency.",
         f"3. **Power Safety:** `{build.psu.wattage_w}W` power supply provides robust headroom over the peak draw of `{build.estimated_peak_power_w}W`.",
     ])
 
+    if val_result and val_result.issues:
+        lines.append("")
+        lines.append("### ❌ Unresolved Constraints & Issues:")
+        for issue in val_result.issues:
+            lines.append(f"- **[{issue.rule_name}]** {issue.message}")
+
     if val_result and val_result.warnings:
         lines.append("")
-        lines.append("### 💡 Notes & Warnings:")
+        lines.append("### 💡 Notes & Recommendations:")
         for w in val_result.warnings:
             lines.append(f"- *{w.rule_name}*: {w.message}")
 
