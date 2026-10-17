@@ -238,18 +238,19 @@ def check_balance_bottleneck(build: PCBuild) -> List[CompatibilityIssue]:
                 suggested_fix="Upgrade to a faster CPU to unlock the full potential of your GPU.",
             )
         )
-    elif ratio < 0.6:
+    elif ratio < 0.5:
         issues.append(
             CompatibilityIssue(
                 severity="warning",
-                rule_name="Overkill CPU for GPU Tier",
+                rule_name="CPU Heavily Outpaces GPU Tier",
                 component_a=f"{build.cpu.name} (Score: {cpu_score})",
                 component_b=f"{build.gpu.name} (Score: {gpu_score})",
                 message=(
-                    f"The CPU '{build.cpu.name}' is disproportionately expensive compared to GPU '{build.gpu.name}'. "
-                    "For dedicated gaming builds, prioritize a higher GPU tier."
+                    f"The CPU '{build.cpu.name}' significantly outpaces the GPU '{build.gpu.name}'. "
+                    "While well-suited for code compilation, data processing, or audio/video tasks, "
+                    "pure gaming workloads would benefit from rebalancing budget toward a higher GPU tier."
                 ),
-                suggested_fix="Rebalance budget: step down CPU tier and step up GPU tier.",
+                suggested_fix="If primarily gaming, consider stepping down the CPU to invest in a faster GPU.",
             )
         )
     return issues

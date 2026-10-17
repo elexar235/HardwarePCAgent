@@ -45,17 +45,23 @@ def _heuristic_parse_requirements(query: str) -> UserRequirements:
     # Budget extraction (USD)
     budget = None
     dollar_match = re.search(r"\$\s*(\d+)", q) or re.search(r"(\d+)\s*(?:\$|usd|bucks)", q)
+    budget_kw_match = re.search(r"budget\s*(?:is|of|around|:)?\s*\$?(\d+)", q)
+
     if dollar_match:
         budget = int(dollar_match.group(1))
+    elif budget_kw_match:
+        budget = int(budget_kw_match.group(1))
     else:
         k_match = re.search(r"(\d+(?:\.\d+)?)\s*k\b", q)
         if k_match:
             val = float(k_match.group(1))
             budget = int(val * 1000) if val < 20 else int(val)
         else:
-            num_match = re.search(r"\b([3-9]\d{2}|[1-9]\d{3})\b", q)
-            if num_match:
-                budget = int(num_match.group(1))
+            # Match 3-4 digit numbers, excluding common game years (e.g. 2077)
+            num_matches = re.findall(r"\b([3-9]\d{2}|[1-9]\d{3})\b", q)
+            valid_nums = [int(n) for n in num_matches if n not in ["2077", "1440", "1080", "2160", "3840"]]
+            if valid_nums:
+                budget = valid_nums[0]
 
     # Resolution (None unless explicitly specified by the user)
     res = None
@@ -183,6 +189,97 @@ def parse_requirements_node(state: AgentState) -> Dict[str, Any]:
     return {"requirements": requirements}
 
 
+def _select_platform_combo(
+    all_cpus: List[CPU],
+    target_platform_budget: int,
+    target_ram_gb: int,
+    require_igpu: bool = False,
+) -> tuple[CPU, Motherboard, RAM]:
+    """Select compatible (CPU, Motherboard, RAM) combo maximizing performance within budget."""
+    candidates = []
+
+    for cpu in all_cpus:
+        if require_igpu and not cpu.has_integrated_gpu:
+            continue
+
+        mobos = db.list_motherboards(socket=cpu.socket)
+        if not mobos:
+            continue
+
+        # Evaluate each supported RAM type for this CPU
+        for ram_type in cpu.supports_ram:
+            compat_mobos = [m for m in mobos if m.ram_type == ram_type]
+            if not compat_mobos:
+                continue
+            best_mobo = compat_mobos[0]
+
+            matching_rams = db.list_rams(ram_type=ram_type, min_capacity_gb=target_ram_gb)
+            if not matching_rams:
+                matching_rams = db.list_rams(ram_type=ram_type)
+            if not matching_rams:
+                continue
+            best_ram = matching_rams[0]
+
+            combo_cost = cpu.price_usd + best_mobo.price_usd + best_ram.price_usd
+            combo_score = cpu.benchmark_score + (best_ram.capacity_gb * 50) + (best_ram.speed_mhz * 0.05)
+
+            candidates.append({
+                "cpu": cpu,
+                "motherboard": best_mobo,
+                "ram": best_ram,
+                "cost": combo_cost,
+                "score": combo_score,
+            })
+
+    if not candidates:
+        cheapest_cpu = min(all_cpus, key=lambda c: c.price_usd)
+        mobo = db.list_motherboards(socket=cheapest_cpu.socket)[0]
+        ram = db.list_rams(ram_type=mobo.ram_type)[0]
+        return cheapest_cpu, mobo, ram
+
+    within_budget = [c for c in candidates if c["cost"] <= target_platform_budget]
+    if within_budget:
+        best = max(within_budget, key=lambda c: c["score"])
+    else:
+        best = min(candidates, key=lambda c: c["cost"])
+
+    return best["cpu"], best["motherboard"], best["ram"]
+
+
+def _select_gpu(
+    all_gpus: List[GPU],
+    target_gpu_budget: int,
+    profile: str,
+    target_resolution: Optional[str] = None,
+) -> Optional[GPU]:
+    """Select optimal GPU dynamically using a multi-criteria scoring function."""
+    if profile == "office":
+        return None
+
+    cheapest_gpu = min(all_gpus, key=lambda g: g.price_usd)
+    available_gpus = [g for g in all_gpus if g.price_usd <= target_gpu_budget]
+    if not available_gpus:
+        available_gpus = [cheapest_gpu]
+
+    def _gpu_score(gpu: GPU) -> float:
+        if profile == "ai_3d":
+            # AI workloads value VRAM capacity and CUDA / Tensor Core acceleration
+            is_nvidia = (
+                gpu.brand.lower() == "nvidia"
+                or "rtx" in gpu.name.lower()
+                or "geforce" in gpu.name.lower()
+            )
+            cuda_weight = 6000.0 if is_nvidia else 0.0
+            return (gpu.vram_gb * 1000.0) + cuda_weight + (gpu.benchmark_score * 0.1)
+        elif profile == "productivity":
+            return float(gpu.benchmark_score) + (gpu.vram_gb * 200.0)
+        else:  # gaming
+            vram_bonus = 3000.0 if (target_resolution == "4k" and gpu.vram_gb >= 16) else 0.0
+            return float(gpu.benchmark_score) + vram_bonus
+
+    return max(available_gpus, key=_gpu_score)
+
+
 def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
     """Node 2: Select balanced components dynamically based on workload profile & budget."""
     requirements = state["requirements"] or _heuristic_parse_requirements(state["user_query"])
@@ -200,130 +297,67 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
             overrun_amount = max(overrun_amount, int(m.group(1).replace(",", "")))
 
     if overrun_amount > 0:
-        # Penalize by at least the overrun plus a small safety step per iteration
         over_budget_penalty = overrun_amount + 30 * iteration
     elif any("exceeds" in f.lower() for f in feedback):
         over_budget_penalty = 60 * max(1, iteration)
 
     adjusted_budget = max(350, budget - over_budget_penalty)
-
     all_cpus = db.list_cpus()
-    cheapest_cpu = min(all_cpus, key=lambda c: c.price_usd)
     all_gpus = db.list_gpus()
-    cheapest_gpu = min(all_gpus, key=lambda g: g.price_usd)
 
-    # 1. Determine CPU & GPU Allocation based on Profile
-    gpu: Optional[GPU] = None
-
+    # Determine dynamic budget fractions by profile
     if profile == "office":
-        # Office / Web Surfing: prioritize CPU with integrated GPU (0$ discrete GPU!)
-        target_cpu_budget = int(adjusted_budget * 0.40)
+        target_platform_budget = int(adjusted_budget * 0.68)
         target_ram_gb = 16
-        igpu_cpus = [c for c in db.list_cpus(max_price=target_cpu_budget) if c.has_integrated_gpu]
-        if not igpu_cpus:
-            all_igpu = [c for c in all_cpus if c.has_integrated_gpu]
-            igpu_cpus = sorted(all_igpu, key=lambda c: c.price_usd)
-        cpu = igpu_cpus[0] if igpu_cpus else cheapest_cpu
         gpu = None
-
-    elif profile == "productivity":
-        target_cpu_budget = int(adjusted_budget * 0.40)
-        target_gpu_budget = int(adjusted_budget * 0.22)
-        target_ram_gb = 64 if adjusted_budget >= 1600 else 32
-
-        available_cpus = db.list_cpus(max_price=target_cpu_budget)
-        cpu = available_cpus[0] if available_cpus else cheapest_cpu
-
-        available_gpus = db.list_gpus(max_price=target_gpu_budget)
-        gpu = available_gpus[0] if available_gpus else cheapest_gpu
-
+        cpu, motherboard, ram = _select_platform_combo(
+            all_cpus=all_cpus,
+            target_platform_budget=target_platform_budget,
+            target_ram_gb=target_ram_gb,
+            require_igpu=True,
+        )
     elif profile == "ai_3d":
         target_gpu_budget = int(adjusted_budget * 0.52)
-        target_cpu_budget = int(adjusted_budget * 0.20)
-        target_ram_gb = 64 if adjusted_budget >= 2000 else 32
-
-        available_gpus = db.list_gpus(max_price=target_gpu_budget)
-        # For AI/ML workloads, prioritize NVIDIA GPUs (CUDA, TensorRT, PyTorch/Ollama)
-        nvidia_gpus = [
-            g for g in available_gpus
-            if g.brand.lower() == "nvidia" or "rtx" in g.name.lower() or "geforce" in g.name.lower()
-        ]
-        nv_16g = [g for g in nvidia_gpus if g.vram_gb >= 16]
-        nv_12g = [g for g in nvidia_gpus if g.vram_gb >= 12]
-        amd_16g = [g for g in available_gpus if g.vram_gb >= 16]
-
-        if nv_16g:
-            gpu = nv_16g[0]
-        elif nv_12g:
-            gpu = nv_12g[0]
-        elif amd_16g:
-            gpu = amd_16g[0]
-        elif nvidia_gpus:
-            gpu = nvidia_gpus[0]
-        elif available_gpus:
-            gpu = available_gpus[0]
-        else:
-            gpu = cheapest_gpu
-
-        # For AI builds under $1400, prefer DDR4-capable CPU to keep total within budget
-        available_cpus = db.list_cpus(max_price=target_cpu_budget)
-        if adjusted_budget < 1400:
-            ddr4_cpus = [c for c in available_cpus if "DDR4" in c.supports_ram]
-            cpu = ddr4_cpus[0] if ddr4_cpus else (available_cpus[0] if available_cpus else cheapest_cpu)
-        else:
-            cpu = available_cpus[0] if available_cpus else cheapest_cpu
-
+        target_platform_budget = int(adjusted_budget * 0.36)
+        target_ram_gb = 32
+        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution)
+        cpu, motherboard, ram = _select_platform_combo(
+            all_cpus=all_cpus,
+            target_platform_budget=target_platform_budget,
+            target_ram_gb=target_ram_gb,
+            require_igpu=False,
+        )
+    elif profile == "productivity":
+        target_gpu_budget = int(adjusted_budget * 0.22)
+        target_platform_budget = int(adjusted_budget * 0.64)
+        target_ram_gb = 32
+        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution)
+        cpu, motherboard, ram = _select_platform_combo(
+            all_cpus=all_cpus,
+            target_platform_budget=target_platform_budget,
+            target_ram_gb=target_ram_gb,
+            require_igpu=False,
+        )
     else:  # gaming
-        target_gpu_budget = int(adjusted_budget * 0.46)
-        target_cpu_budget = int(adjusted_budget * 0.22)
-        target_ram_gb = 32 if adjusted_budget >= 1200 else 16
+        target_gpu_budget = int(adjusted_budget * 0.48)
+        target_platform_budget = int(adjusted_budget * 0.38)
+        target_ram_gb = 16
+        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution)
+        cpu, motherboard, ram = _select_platform_combo(
+            all_cpus=all_cpus,
+            target_platform_budget=target_platform_budget,
+            target_ram_gb=target_ram_gb,
+            require_igpu=False,
+        )
 
-        available_gpus = db.list_gpus(max_price=target_gpu_budget)
-        gpu = available_gpus[0] if available_gpus else cheapest_gpu
-
-        if requirements.resolution == "4k":
-            high_vram_gpus = [g for g in available_gpus if g.vram_gb >= 16]
-            if high_vram_gpus:
-                gpu = high_vram_gpus[0]
-
-        available_cpus = db.list_cpus(max_price=target_cpu_budget)
-        modern_cpus = [c for c in available_cpus if c.socket in ["AM5", "LGA1851"]]
-        if adjusted_budget >= 900 and modern_cpus:
-            x3d_cpus = [c for c in modern_cpus if "X3D" in c.name]
-            cpu = x3d_cpus[0] if x3d_cpus else modern_cpus[0]
-        else:
-            cpu = available_cpus[0] if available_cpus else cheapest_cpu
-
-    # 2. Select Motherboard strictly matching CPU socket
-    target_ram_type = "DDR5" if "DDR5" in cpu.supports_ram and cpu.socket in ["AM5", "LGA1851"] else "DDR4"
-    motherboards = db.list_motherboards(socket=cpu.socket, ram_type=target_ram_type)
-    if not motherboards:
-        motherboards = db.list_motherboards(socket=cpu.socket)
-    motherboard = motherboards[0]
-
-    actual_ram_type = motherboard.ram_type
-
-    # 3. Select RAM
-    rams = db.list_rams(ram_type=actual_ram_type, min_capacity_gb=target_ram_gb)
-    if not rams:
-        rams = db.list_rams(ram_type=actual_ram_type)
-    ram = rams[0]
-
-    # 4. Select Storage
+    # 4. Select Storage dynamically by budget allocation
     storages = db.list_storages()
-    if profile == "office" or adjusted_budget <= 600:
-        storage = storages[0]  # The most affordable NVMe drive ($38 for 500GB)
-    elif adjusted_budget >= 2000:
-        high_cap = [s for s in storages if s.capacity_gb >= 2000]
-        storage = high_cap[0] if high_cap else storages[0]
-    elif adjusted_budget >= 1400:
-        one_tb = [s for s in storages if s.capacity_gb == 1000]
-        storage = max(one_tb, key=lambda s: s.read_speed_mb_s) if one_tb else storages[0]
-    elif adjusted_budget >= 800:
-        one_tb = [s for s in storages if s.capacity_gb == 1000]
-        storage = one_tb[0] if one_tb else storages[0]
-    else:
+    target_storage_budget = max(40, int(adjusted_budget * 0.08))
+    affordable_storages = [s for s in storages if s.price_usd <= target_storage_budget]
+    if not affordable_storages:
         storage = storages[0]
+    else:
+        storage = max(affordable_storages, key=lambda s: (s.capacity_gb, s.read_speed_mb_s))
 
     # 5. Select PSU based on system load
     gpu_power = gpu.tdp_w if gpu else 0
@@ -455,12 +489,8 @@ def explain_build_node(state: AgentState) -> Dict[str, Any]:
     if profile == "gaming":
         resolution = requirements.resolution if (requirements and requirements.resolution) else None
         if not resolution:
-            if budget >= 1800:
-                resolution = "4k"
-            elif budget >= 900:
-                resolution = "1440p"
-            else:
-                resolution = "1080p"
+            # Default gaming resolution is 1080p (Full HD) unless explicitly requested
+            resolution = "1080p"
 
     fps_estimates = _estimate_game_fps(build.gpu, resolution) if (profile == "gaming" and resolution) else {}
 

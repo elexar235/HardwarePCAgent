@@ -630,6 +630,119 @@ GPUS_SEED: List[Dict[str, Any]] = [
         "price_usd": 489,
         "benchmark_score": 19500,
     },
+    # --- Intel Arc Series (Battlemage & Alchemist) ---
+    {
+        "id": "gpu-arc-b580-12g",
+        "name": "Sparkle Intel Arc B580 Titan OC 12GB",
+        "brand": "Intel",
+        "chip": "Arc B580",
+        "vram_gb": 12,
+        "tdp_w": 190,
+        "recommended_psu_w": 550,
+        "length_mm": 250,
+        "price_usd": 249,
+        "benchmark_score": 11200,
+    },
+    {
+        "id": "gpu-arc-a580-8g",
+        "name": "ASRock Challenger Intel Arc A580 8GB",
+        "brand": "Intel",
+        "chip": "Arc A580",
+        "vram_gb": 8,
+        "tdp_w": 185,
+        "recommended_psu_w": 550,
+        "length_mm": 222,
+        "price_usd": 169,
+        "benchmark_score": 7900,
+    },
+
+    # --- NVIDIA Mid & Budget Additions ---
+    {
+        "id": "gpu-rtx4070-12g",
+        "name": "ASUS Dual GeForce RTX 4070 EVO 12GB",
+        "brand": "ASUS",
+        "chip": "RTX 4070",
+        "vram_gb": 12,
+        "tdp_w": 200,
+        "recommended_psu_w": 650,
+        "length_mm": 227,
+        "price_usd": 529,
+        "benchmark_score": 18500,
+    },
+    {
+        "id": "gpu-rtx4060ti-8g",
+        "name": "Palit GeForce RTX 4060 Ti Dual 8GB",
+        "brand": "Palit",
+        "chip": "RTX 4060 Ti",
+        "vram_gb": 8,
+        "tdp_w": 160,
+        "recommended_psu_w": 550,
+        "length_mm": 249,
+        "price_usd": 369,
+        "benchmark_score": 13900,
+    },
+    {
+        "id": "gpu-rtx3050-6g",
+        "name": "MSI GeForce RTX 3050 Ventus 2X 6GB (Low-TDP)",
+        "brand": "MSI",
+        "chip": "RTX 3050",
+        "vram_gb": 6,
+        "tdp_w": 70,
+        "recommended_psu_w": 400,
+        "length_mm": 189,
+        "price_usd": 169,
+        "benchmark_score": 6200,
+    },
+
+    # --- AMD Radeon RX 7000-Series Additions ---
+    {
+        "id": "gpu-rx7900gre-16g",
+        "name": "Sapphire PULSE AMD Radeon RX 7900 GRE 16GB",
+        "brand": "Sapphire",
+        "chip": "RX 7900 GRE",
+        "vram_gb": 16,
+        "tdp_w": 260,
+        "recommended_psu_w": 700,
+        "length_mm": 280,
+        "price_usd": 539,
+        "benchmark_score": 22000,
+    },
+    {
+        "id": "gpu-rx7700xt-12g",
+        "name": "Gigabyte GAMING OC AMD Radeon RX 7700 XT 12GB",
+        "brand": "Gigabyte",
+        "chip": "RX 7700 XT",
+        "vram_gb": 12,
+        "tdp_w": 245,
+        "recommended_psu_w": 700,
+        "length_mm": 302,
+        "price_usd": 399,
+        "benchmark_score": 17200,
+    },
+    {
+        "id": "gpu-rx7600xt-16g",
+        "name": "Sapphire PULSE AMD Radeon RX 7600 XT 16GB",
+        "brand": "Sapphire",
+        "chip": "RX 7600 XT",
+        "vram_gb": 16,
+        "tdp_w": 190,
+        "recommended_psu_w": 600,
+        "length_mm": 250,
+        "price_usd": 319,
+        "benchmark_score": 12200,
+    },
+    {
+        "id": "gpu-rx7600-8g",
+        "name": "PowerColor Fighter AMD Radeon RX 7600 8GB",
+        "brand": "PowerColor",
+        "chip": "RX 7600",
+        "vram_gb": 8,
+        "tdp_w": 165,
+        "recommended_psu_w": 550,
+        "length_mm": 200,
+        "price_usd": 249,
+        "benchmark_score": 10600,
+    },
     {
         "id": "gpu-rx6600-8g",
         "name": "PowerColor Fighter AMD Radeon RX 6600 8GB",
@@ -645,7 +758,7 @@ GPUS_SEED: List[Dict[str, Any]] = [
 ]
 
 RAMS_SEED: List[Dict[str, Any]] = [
-    # --- DDR5 (Reflecting 2025/2026 Memory Run & Market Pricing) ---
+    # --- DDR5 (Reflecting live 2026 Memory Market Inflation) ---
     {
         "id": "ram-96g-d5-6400",
         "name": "Corsair Vengeance 96GB (2x48GB) DDR5 6400MHz CL32",
@@ -664,7 +777,7 @@ RAMS_SEED: List[Dict[str, Any]] = [
         "capacity_gb": 64,
         "speed_mhz": 6000,
         "modules_count": 2,
-        "price_usd": 549,
+        "price_usd": 579,
     },
     {
         "id": "ram-32g-d5-6000",
@@ -674,7 +787,7 @@ RAMS_SEED: List[Dict[str, Any]] = [
         "capacity_gb": 32,
         "speed_mhz": 6000,
         "modules_count": 2,
-        "price_usd": 279,
+        "price_usd": 299,
     },
     {
         "id": "ram-16g-d5-5600",
@@ -684,7 +797,7 @@ RAMS_SEED: List[Dict[str, Any]] = [
         "capacity_gb": 16,
         "speed_mhz": 5600,
         "modules_count": 2,
-        "price_usd": 129,
+        "price_usd": 139,
     },
 
     # --- DDR4 (Affordable mainstream for budget & office builds) ---
@@ -696,7 +809,7 @@ RAMS_SEED: List[Dict[str, Any]] = [
         "capacity_gb": 64,
         "speed_mhz": 3600,
         "modules_count": 2,
-        "price_usd": 135,
+        "price_usd": 159,
     },
     {
         "id": "ram-32g-d4-3600",
@@ -706,7 +819,7 @@ RAMS_SEED: List[Dict[str, Any]] = [
         "capacity_gb": 32,
         "speed_mhz": 3600,
         "modules_count": 2,
-        "price_usd": 68,
+        "price_usd": 75,
     },
     {
         "id": "ram-16g-d4-3200",
@@ -716,7 +829,7 @@ RAMS_SEED: List[Dict[str, Any]] = [
         "capacity_gb": 16,
         "speed_mhz": 3200,
         "modules_count": 2,
-        "price_usd": 38,
+        "price_usd": 42,
     },
 ]
 
