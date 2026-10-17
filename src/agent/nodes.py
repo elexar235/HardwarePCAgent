@@ -90,6 +90,11 @@ def _heuristic_parse_requirements(query: str) -> UserRequirements:
     ]
     games = [g for g in known_games if g in q]
 
+    # Detect general gaming intent if specific game titles are not explicitly named
+    gaming_keywords = ["game", "games", "gaming", "gamer", "play", "playing", "esports"]
+    if any(k in q for k in gaming_keywords) and not games:
+        games = ["General Gaming"]
+
     # Known non-gaming workloads
     known_tasks = [
         "blender",
@@ -450,12 +455,22 @@ def should_continue(state: AgentState) -> str:
     return "explain"
 
 
-def _estimate_game_fps(gpu: Optional[GPU], resolution: str) -> Dict[str, int]:
-    """Estimate average FPS based on GPU benchmark score and resolution scale."""
+def _estimate_game_fps(
+    gpu: Optional[GPU], cpu: Optional[CPU], resolution: str
+) -> Dict[str, int]:
+    """Estimate average FPS based on GPU benchmark score or integrated CPU graphics."""
     if not gpu:
+        if cpu and cpu.has_integrated_gpu:
+            is_amd = "radeon" in cpu.name.lower() or "vega" in cpu.name.lower()
+            return {
+                "Counter-Strike 2 (720p/1080p Low)": 60 if is_amd else 35,
+                "Valorant (1080p Low)": 95 if is_amd else 55,
+                "Dota 2 (1080p Medium)": 65 if is_amd else 40,
+                "GTA V (1080p Normal)": 45 if is_amd else 28,
+            }
         return {}
 
-    scale = {"1080p": 1.0, "1440p": 0.72, "4k": 0.44}.get(resolution, 0.72)
+    scale = {"1080p": 1.0, "1440p": 0.72, "4k": 0.44}.get(resolution, 1.0)
     score = gpu.benchmark_score
 
     cyberpunk_fps = int((score / 220) * scale)
@@ -492,7 +507,11 @@ def explain_build_node(state: AgentState) -> Dict[str, Any]:
             # Default gaming resolution is 1080p (Full HD) unless explicitly requested
             resolution = "1080p"
 
-    fps_estimates = _estimate_game_fps(build.gpu, resolution) if (profile == "gaming" and resolution) else {}
+    fps_estimates = (
+        _estimate_game_fps(build.gpu, build.cpu, resolution)
+        if (profile == "gaming" and resolution)
+        else {}
+    )
 
     status_icon = "✅" if val_result and val_result.is_compatible else "⚠️"
     status_text = "100% Fully Compatible" if val_result and val_result.is_compatible else "Budget/Hardware adjustments needed"
@@ -545,10 +564,21 @@ def explain_build_node(state: AgentState) -> Dict[str, Any]:
     if budget and build.total_price > budget:
         overrun = build.total_price - budget
         if profile == "gaming" and resolution:
+            if resolution == "1080p":
+                advice = (
+                    f"A dedicated gaming PC requires at least ~$500 for entry-level hardware. "
+                    f"To stay closer to ${budget}, consider an AMD APU build (e.g. Ryzen 5 5600G with Vega 7 iGPU for ~$365) "
+                    "for esports titles at 720p/1080p Low, or increase the budget."
+                )
+            else:
+                advice = (
+                    f"Gaming at {resolution.upper()} requires high-tier graphics hardware starting at $350+ for the GPU alone. "
+                    f"To meet a ${budget} ceiling, consider dropping target resolution to 1080p or increasing the budget."
+                )
             lines.extend([
                 "",
                 f"> ⚠️ **Budget Constraint Notice:** The minimum viable configuration for `{resolution.upper()}` gaming is **${build.total_price:,}**, which exceeds your budget of **${budget:,}** by **${overrun:,}**.",
-                f"> *Feasibility Note:* Gaming at **{resolution.upper()}** requires modern graphics hardware starting at $350+ for the GPU alone. To meet a ${budget} ceiling, consider dropping target resolution to 1080p or increasing budget.",
+                f"> *Feasibility Note:* {advice}",
             ])
         else:
             profile_hints = {
@@ -579,9 +609,10 @@ def explain_build_node(state: AgentState) -> Dict[str, Any]:
 
     # Show gaming benchmarks only when the build is actually targeting gaming
     if profile == "gaming" and fps_estimates and resolution:
+        title_tag = f"{resolution.upper()} High/Ultra" if build.gpu else "Integrated Graphics 720p/1080p Low"
         lines.extend([
             "",
-            f"### 🎮 Estimated Gaming Benchmarks ({resolution.upper()} High/Ultra):",
+            f"### 🎮 Estimated Gaming Benchmarks ({title_tag}):",
         ])
         for game, fps in fps_estimates.items():
             lines.append(f"- **{game}:** ~`{fps} FPS`")
