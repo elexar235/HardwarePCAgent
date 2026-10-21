@@ -167,3 +167,32 @@ def test_psu_underpowered_fails(valid_am5_build: PCBuild):
     result = validate_pc_build(invalid_build)
     assert result.is_compatible is False
     assert any("Insufficient Power" in issue.rule_name for issue in result.issues)
+
+
+def test_cooler_socket_mismatch_fails(valid_am5_build: PCBuild):
+    invalid_build = valid_am5_build.model_copy(deep=True)
+    invalid_build.cooler.supported_sockets = ["LGA1700", "LGA1200"]  # Missing AM5
+
+    result = validate_pc_build(invalid_build)
+    assert result.is_compatible is False
+    assert any("Cooler Socket Mismatch" in issue.rule_name for issue in result.issues)
+
+
+def test_cooler_insufficient_tdp_warning(valid_am5_build: PCBuild):
+    warning_build = valid_am5_build.model_copy(deep=True)
+    warning_build.cpu.tdp_w = 250
+    warning_build.cooler.max_tdp_w = 120
+
+    result = validate_pc_build(warning_build)
+    # Warnings do not invalidate compatibility
+    assert any("Thermal Dissipation Warning" in w.rule_name for w in result.warnings)
+
+
+def test_motherboard_form_factor_incompatible_fails(valid_am5_build: PCBuild):
+    invalid_build = valid_am5_build.model_copy(deep=True)
+    invalid_build.motherboard.form_factor = "E-ATX"
+    invalid_build.case.supported_form_factors = ["Mini-ITX"]
+
+    result = validate_pc_build(invalid_build)
+    assert result.is_compatible is False
+    assert any("Form Factor Incompatibility" in issue.rule_name for issue in result.issues)

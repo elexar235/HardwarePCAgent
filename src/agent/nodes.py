@@ -41,35 +41,49 @@ def _get_llm() -> Optional[ChatOpenAI]:
 def _heuristic_parse_requirements(query: str) -> UserRequirements:
     """Fallback rule-based parser when LLM API key is not configured."""
     q = query.lower()
+    clean_q = re.sub(r"(?<=\d),(?=\d)", "", q)
 
     # Budget extraction (USD)
     budget = None
-    dollar_match = re.search(r"\$\s*(\d+)", q) or re.search(r"(\d+)\s*(?:\$|usd|bucks)", q)
-    budget_kw_match = re.search(r"budget\s*(?:is|of|around|:)?\s*\$?(\d+)", q)
+    dollar_match = re.search(r"\$\s*(\d+)", clean_q) or re.search(r"(\d+)\s*(?:\$|usd|bucks)", clean_q)
+    budget_kw_match = re.search(r"budget\s*(?:is|of|around|:)?\s*\$?(\d+)", clean_q)
 
     if dollar_match:
         budget = int(dollar_match.group(1))
     elif budget_kw_match:
         budget = int(budget_kw_match.group(1))
     else:
-        k_match = re.search(r"(\d+(?:\.\d+)?)\s*k\b", q)
+        k_match = re.search(r"(\d+(?:\.\d+)?)\s*k\b", clean_q)
         if k_match:
             val = float(k_match.group(1))
             budget = int(val * 1000) if val < 20 else int(val)
         else:
-            # Match 3-4 digit numbers, excluding common game years (e.g. 2077)
-            num_matches = re.findall(r"\b([3-9]\d{2}|[1-9]\d{3})\b", q)
-            valid_nums = [int(n) for n in num_matches if n not in ["2077", "1440", "1080", "2160", "3840"]]
+            # Strip known hardware tokens and display resolutions before searching for standalone budget numbers
+            q_stripped = re.sub(
+                r"\b(rtx|gtx|rx|radeon|geforce|arc|ryzen\s*\d?|core\s*i\d|intel|amd|i[3579])\s*[-_]?\s*\d+\w*\b",
+                "",
+                clean_q,
+            )
+            # Match 3-4 digit numbers, excluding common game years (e.g. 2077) and hardware models
+            num_matches = re.findall(r"\b([3-9]\d{2}|[1-9]\d{3})\b", q_stripped)
+            valid_nums = [
+                int(n)
+                for n in num_matches
+                if n not in [
+                    "2077", "1440", "1080", "2160", "3840", "5600", "7600", "7700", "7800",
+                    "4060", "4070", "4080", "4090", "3060", "3050"
+                ]
+            ]
             if valid_nums:
                 budget = valid_nums[0]
 
     # Resolution (None unless explicitly specified by the user)
     res = None
-    if "4k" in q or "3840" in q or "uhd" in q:
+    if "4k" in clean_q or "3840" in clean_q or "uhd" in clean_q:
         res = "4k"
-    elif "1080p" in q or "fhd" in q or "full hd" in q:
+    elif "1080p" in clean_q or "fhd" in clean_q or "full hd" in clean_q:
         res = "1080p"
-    elif "2k" in q or "1440p" in q or "qhd" in q:
+    elif "2k" in clean_q or "1440p" in clean_q or "qhd" in clean_q:
         res = "1440p"
 
     # Known target games
@@ -88,11 +102,11 @@ def _heuristic_parse_requirements(query: str) -> UserRequirements:
         "escape from tarkov",
         "fortnite",
     ]
-    games = [g for g in known_games if g in q]
+    games = [g for g in known_games if g in clean_q]
 
     # Detect general gaming intent if specific game titles are not explicitly named
     gaming_keywords = ["game", "games", "gaming", "gamer", "play", "playing", "esports"]
-    if any(k in q for k in gaming_keywords) and not games:
+    if any(k in clean_q for k in gaming_keywords) and not games:
         games = ["General Gaming"]
 
     # Known non-gaming workloads
@@ -117,7 +131,24 @@ def _heuristic_parse_requirements(query: str) -> UserRequirements:
         "browser",
         "web surfing",
     ]
-    tasks = [t for t in known_tasks if t in q]
+    tasks = [t for t in known_tasks if t in clean_q]
+
+    # Priorities & user preferences (APU, RAM, Storage)
+    priorities = []
+    if any(k in clean_q for k in ["apu", "integrated graphics", "igpu", "no dedicated gpu", "no gpu", "built-in graphics", "5600g"]):
+        priorities.append("apu")
+
+    ram_match = re.search(r"\b(16|32|64|128)\s*gb\s*(?:ram|memory|ddr\d)?\b", clean_q)
+    if ram_match:
+        priorities.append(f"ram_{ram_match.group(1)}gb")
+
+    storage_tb_match = re.search(r"\b([124])\s*tb\s*(?:ssd|m2|nvme|storage|drive)?\b", clean_q)
+    storage_gb_match = re.search(r"\b(500|512|1000|2000)\s*gb\s*(?:ssd|m2|nvme|storage|drive)?\b", clean_q)
+    if storage_tb_match:
+        cap_gb = int(storage_tb_match.group(1)) * 1000
+        priorities.append(f"storage_{cap_gb}gb")
+    elif storage_gb_match:
+        priorities.append(f"storage_{storage_gb_match.group(1)}gb")
 
     # Fallback default budget
     if not budget:
@@ -129,6 +160,7 @@ def _heuristic_parse_requirements(query: str) -> UserRequirements:
         target_fps=60,
         target_games=games,
         work_tasks=tasks,
+        priorities=priorities,
     )
 
 
@@ -310,10 +342,30 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
     all_cpus = db.list_cpus()
     all_gpus = db.list_gpus()
 
+    wants_apu = "apu" in requirements.priorities
+
+    # Check requested RAM
+    requested_ram = 16
+    for p in requirements.priorities:
+        if p.startswith("ram_") and p.endswith("gb"):
+            try:
+                requested_ram = int(p.split("_")[1].replace("gb", ""))
+            except ValueError:
+                pass
+
+    # Check requested Storage
+    requested_storage_gb = None
+    for p in requirements.priorities:
+        if p.startswith("storage_") and p.endswith("gb"):
+            try:
+                requested_storage_gb = int(p.split("_")[1].replace("gb", ""))
+            except ValueError:
+                pass
+
     # Determine dynamic budget fractions by profile
-    if profile == "office":
+    if profile == "office" or wants_apu:
         target_platform_budget = int(adjusted_budget * 0.68)
-        target_ram_gb = 16
+        target_ram_gb = max(16, requested_ram)
         gpu = None
         cpu, motherboard, ram = _select_platform_combo(
             all_cpus=all_cpus,
@@ -324,7 +376,7 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
     elif profile == "ai_3d":
         target_gpu_budget = int(adjusted_budget * 0.52)
         target_platform_budget = int(adjusted_budget * 0.36)
-        target_ram_gb = 32
+        target_ram_gb = max(32, requested_ram)
         gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution)
         cpu, motherboard, ram = _select_platform_combo(
             all_cpus=all_cpus,
@@ -335,7 +387,7 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
     elif profile == "productivity":
         target_gpu_budget = int(adjusted_budget * 0.22)
         target_platform_budget = int(adjusted_budget * 0.64)
-        target_ram_gb = 32
+        target_ram_gb = max(32, requested_ram)
         gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution)
         cpu, motherboard, ram = _select_platform_combo(
             all_cpus=all_cpus,
@@ -346,7 +398,7 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
     else:  # gaming
         target_gpu_budget = int(adjusted_budget * 0.48)
         target_platform_budget = int(adjusted_budget * 0.38)
-        target_ram_gb = 16
+        target_ram_gb = max(16, requested_ram)
         gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution)
         cpu, motherboard, ram = _select_platform_combo(
             all_cpus=all_cpus,
@@ -355,8 +407,15 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
             require_igpu=False,
         )
 
-    # 4. Select Storage dynamically by budget allocation
-    storages = db.list_storages()
+    # 4. Select Storage dynamically by budget allocation & capacity request
+    storages = (
+        db.list_storages(min_capacity_gb=requested_storage_gb)
+        if requested_storage_gb
+        else db.list_storages()
+    )
+    if not storages:
+        storages = db.list_storages()
+
     target_storage_budget = max(40, int(adjusted_budget * 0.08))
     affordable_storages = [s for s in storages if s.price_usd <= target_storage_budget]
     if not affordable_storages:
@@ -366,7 +425,7 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
 
     # 5. Select PSU based on system load
     gpu_power = gpu.tdp_w if gpu else 0
-    gpu_rec_psu = gpu.recommended_psu_w if gpu else (300 if profile == "office" else 400)
+    gpu_rec_psu = gpu.recommended_psu_w if gpu else (300 if (profile == "office" or wants_apu) else 400)
     estimated_power = cpu.tdp_w + gpu_power + 50
     min_psu_wattage = max(gpu_rec_psu, int(estimated_power * 1.25))
 
@@ -375,12 +434,16 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
         psus = db.list_psus()
     psu = psus[0]
 
-    # 6. Select Case
-    cases = db.list_cases(form_factor=motherboard.form_factor)
+    # 6. Select Case ensuring motherboard form factor compatibility is strictly preserved
+    form_factor_cases = db.list_cases(form_factor=motherboard.form_factor)
+    if not form_factor_cases:
+        form_factor_cases = db.list_cases()
+
     if gpu:
-        cases = [c for c in cases if c.max_gpu_length_mm >= gpu.length_mm]
-    if not cases:
-        cases = db.list_cases()
+        gpu_compatible_cases = [c for c in form_factor_cases if c.max_gpu_length_mm >= gpu.length_mm]
+        cases = gpu_compatible_cases if gpu_compatible_cases else form_factor_cases
+    else:
+        cases = form_factor_cases
     case = cases[0]
 
     # 7. Select Cooler
@@ -621,12 +684,28 @@ def explain_build_node(state: AgentState) -> Dict[str, Any]:
     if profile == "office":
         gpu_rationale = "Utilizing cost-effective CPU integrated graphics ($0) to minimize cost, noise, and power draw for web surfing and office applications."
     elif profile == "ai_3d":
-        backend = "NVIDIA CUDA / Tensor Cores" if (build.gpu and (build.gpu.brand.lower() == "nvidia" or "rtx" in build.gpu.name.lower())) else "High-VRAM Compute"
-        gpu_rationale = f"Dedicated GPU ({build.gpu.name}) selected for {build.gpu.vram_gb}GB VRAM and {backend} for model training and local LLM inference."
+        backend = (
+            "NVIDIA CUDA / Tensor Cores"
+            if (build.gpu and (build.gpu.brand.lower() == "nvidia" or "rtx" in build.gpu.name.lower()))
+            else "High-VRAM Compute"
+        )
+        gpu_rationale = (
+            f"Dedicated GPU ({build.gpu.name}) selected for {build.gpu.vram_gb}GB VRAM and {backend} for model training and local LLM inference."
+            if build.gpu
+            else f"Integrated graphics ({build.cpu.name}) utilized for essential display output."
+        )
     elif profile == "productivity":
-        gpu_rationale = f"Dedicated graphics ({build.gpu.name}) selected for multi-display productivity and hardware-accelerated video/rendering workflows."
+        gpu_rationale = (
+            f"Dedicated graphics ({build.gpu.name}) selected for multi-display productivity and hardware-accelerated video/rendering workflows."
+            if build.gpu
+            else f"Integrated graphics ({build.cpu.name}) utilized for desktop display output."
+        )
     else:
-        gpu_rationale = f"Dedicated graphics ({build.gpu.name}) chosen to meet framerate and visual fidelity targets."
+        gpu_rationale = (
+            f"Dedicated graphics ({build.gpu.name}) chosen to meet framerate and visual fidelity targets."
+            if build.gpu
+            else f"Integrated Radeon/Vega graphics ({build.cpu.name}) utilized for entry-level esports and casual gaming within strict budget."
+        )
 
     lines.extend([
         "",
