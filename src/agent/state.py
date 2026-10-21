@@ -14,3 +14,4 @@ class AgentState(TypedDict):
     iteration_count: int
     feedback_history: List[str]
     final_response: Optional[str]
+    parser_source: Optional[str]

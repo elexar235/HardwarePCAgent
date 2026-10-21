@@ -19,6 +19,12 @@ from src.models import GPU, CPU, UserRequirements
 db = HardwareDatabase(db_path=DB_PATH)
 
 
+@pytest.fixture(autouse=True)
+def disable_external_llm(monkeypatch):
+    """Ensure automated tests run deterministically against the heuristic engine without network/model lag."""
+    monkeypatch.setattr("src.agent.nodes._get_llm", lambda: None)
+
+
 # =========================================================================
 # 1. Heuristic Requirements Parser Tests
 # =========================================================================

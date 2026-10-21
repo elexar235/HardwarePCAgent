@@ -1,5 +1,6 @@
 """Graph nodes and execution logic for the PC Builder Agent."""
 
+import json
 import re
 from typing import Any, Dict, List, Optional
 from langchain_core.messages import HumanMessage, SystemMessage
@@ -133,17 +134,20 @@ def _heuristic_parse_requirements(query: str) -> UserRequirements:
     ]
     tasks = [t for t in known_tasks if t in clean_q]
 
-    # Priorities & user preferences (APU, RAM, Storage)
+    # Priorities & user preferences (APU, RAM, Storage, Silence)
     priorities = []
     if any(k in clean_q for k in ["apu", "integrated graphics", "igpu", "no dedicated gpu", "no gpu", "built-in graphics", "5600g"]):
         priorities.append("apu")
 
-    ram_match = re.search(r"\b(16|32|64|128)\s*gb\s*(?:ram|memory|ddr\d)?\b", clean_q)
+    if any(k in clean_q for k in ["quiet", "silent"]):
+        priorities.append("quiet")
+
+    ram_match = re.search(r"\b(16|32|64|128)\s*gb\b", clean_q)
     if ram_match:
         priorities.append(f"ram_{ram_match.group(1)}gb")
 
-    storage_tb_match = re.search(r"\b([124])\s*tb\s*(?:ssd|m2|nvme|storage|drive)?\b", clean_q)
-    storage_gb_match = re.search(r"\b(500|512|1000|2000)\s*gb\s*(?:ssd|m2|nvme|storage|drive)?\b", clean_q)
+    storage_tb_match = re.search(r"\b([124])\s*tb\b", clean_q)
+    storage_gb_match = re.search(r"\b(500|512|1000|2000)\s*gb\b", clean_q)
     if storage_tb_match:
         cap_gb = int(storage_tb_match.group(1)) * 1000
         priorities.append(f"storage_{cap_gb}gb")
@@ -166,27 +170,36 @@ def _heuristic_parse_requirements(query: str) -> UserRequirements:
 
 def _determine_workload_profile(req: UserRequirements) -> str:
     """Classify user intent into a specific workload profile."""
+    # Filter out false-positive software from target_games
+    false_game_keywords = ["blender", "render", "editing", "premiere", "cycles"]
+    clean_games = [
+        g.lower()
+        for g in req.target_games
+        if not any(fk in g.lower() for fk in false_game_keywords)
+    ]
     tasks = [t.lower() for t in req.work_tasks]
-    games = [g.lower() for g in req.target_games]
 
-    has_heavy_gpu_tasks = any(
-        k in tasks for k in ["3d rendering", "blender", "machine learning", "ai", "local llm"]
-    )
-    has_productivity = any(
-        k in tasks
-        for k in [
-            "programming",
-            "coding",
-            "software development",
-            "video editing",
-            "audio",
-            "music",
-            "fl studio",
-            "daw",
-        ]
-    )
-    is_office = any(k in tasks for k in ["office", "surfing", "browser", "web surfing"])
-    is_gaming = len(games) > 0 or (req.resolution is not None)
+    heavy_tokens = ["3d rendering", "blender", "render", "machine learning", "ai", "local llm"]
+    has_heavy_gpu_tasks = any(any(tok in t for tok in heavy_tokens) for t in tasks)
+
+    prod_tokens = [
+        "programming",
+        "coding",
+        "software development",
+        "video editing",
+        "editing",
+        "audio",
+        "music",
+        "fl studio",
+        "daw",
+        "streaming",
+    ]
+    has_productivity = any(any(tok in t for tok in prod_tokens) for t in tasks)
+
+    office_tokens = ["office", "surfing", "browser", "web surfing"]
+    is_office = any(any(tok in t for tok in office_tokens) for t in tasks)
+
+    is_gaming = len(clean_games) > 0 or (req.resolution is not None and not has_heavy_gpu_tasks)
 
     if has_heavy_gpu_tasks:
         return "ai_3d"
@@ -205,25 +218,79 @@ def parse_requirements_node(state: AgentState) -> Dict[str, Any]:
     """Node 1: Extract structured user requirements from natural language input."""
     user_query = state["user_query"]
     llm = _get_llm()
+    parser_source = "Deterministic Heuristic Engine"
+    requirements = None
 
     if llm:
+        # 1. Try structured output (OpenAI / native tool-calling models)
         try:
             structured_llm = llm.with_structured_output(UserRequirements)
             system_prompt = (
-                "You are an expert PC hardware consultant. Extract detailed structured requirements "
-                "from the user's natural language request. Infer budget in USD."
+                "You are an expert PC hardware consultant. Analyze the user request (which may be in any language) "
+                "and extract structured requirements in English.\n"
+                "Strict Rules:\n"
+                "1. 'target_games': ONLY real video games (Cyberpunk, CS2, etc.). NEVER software like Blender or Video Editing here. If none, use [].\n"
+                "2. 'resolution': Only set if user explicitly requested a gaming resolution (1080p, 1440p, 4k). Otherwise null.\n"
+                "3. 'priorities': Include tags like 'ram_32gb', 'ram_64gb', 'storage_2000gb', 'quiet', 'apu' when requested.\n"
+                "Infer budget in USD (default 1200)."
             )
-            requirements = structured_llm.invoke(
+            res = structured_llm.invoke(
                 [SystemMessage(content=system_prompt), HumanMessage(content=user_query)]
             )
-            if not requirements.budget_usd:
-                requirements.budget_usd = 1200
-            return {"requirements": requirements}
+            if res and isinstance(res, UserRequirements):
+                requirements = res
+                parser_source = f"Local LLM ({OPENAI_MODEL})"
         except Exception:
             pass
 
-    requirements = _heuristic_parse_requirements(user_query)
-    return {"requirements": requirements}
+        # 2. Robust direct JSON prompt fallback (works with any local Ollama / LM Studio model)
+        if not requirements:
+            try:
+                prompt = (
+                    "You are an expert PC hardware consultant. Analyze the user request (in any language) "
+                    "and extract requirements into a single English JSON object matching this schema:\n"
+                    "{\n"
+                    '  "budget_usd": integer (budget in USD, default 1200),\n'
+                    '  "resolution": "1080p", "1440p", "4k", or null,\n'
+                    '  "target_games": [list of video games, or []],\n'
+                    '  "work_tasks": [list of work tasks like "blender", "video editing", "programming", "office"],\n'
+                    '  "priorities": [list of tags like "ram_32gb", "storage_2000gb", "quiet", "apu"]\n'
+                    "}\n"
+                    "Output ONLY the raw JSON object."
+                )
+                resp = llm.invoke([SystemMessage(content=prompt), HumanMessage(content=user_query)])
+                content = resp.content.strip() if hasattr(resp, "content") else str(resp)
+                m = re.search(r"\{.*\}", content, re.DOTALL)
+                if m:
+                    data = json.loads(m.group(0))
+                    requirements = UserRequirements.model_validate(data)
+                    parser_source = f"Local LLM ({OPENAI_MODEL})"
+            except Exception:
+                pass
+
+    if not requirements:
+        requirements = _heuristic_parse_requirements(user_query)
+
+    # Post-process: ensure explicit hardware numbers from query are captured in priorities
+    q_lower = user_query.lower()
+    ram_m = re.search(r"\b(16|32|64|128)\s*gb\b", q_lower)
+    if ram_m and not any(p.startswith("ram_") for p in requirements.priorities):
+        requirements.priorities.append(f"ram_{ram_m.group(1)}gb")
+
+    tb_m = re.search(r"\b([124])\s*tb\b", q_lower)
+    if tb_m and not any(p.startswith("storage_") for p in requirements.priorities):
+        requirements.priorities.append(f"storage_{int(tb_m.group(1)) * 1000}gb")
+
+    if any(k in q_lower for k in ["quiet", "silent"]) and "quiet" not in requirements.priorities:
+        requirements.priorities.append("quiet")
+
+    if not requirements.budget_usd:
+        requirements.budget_usd = 1200
+
+    return {
+        "requirements": requirements,
+        "parser_source": parser_source,
+    }
 
 
 def _select_platform_combo(
