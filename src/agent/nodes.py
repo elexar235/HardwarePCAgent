@@ -365,6 +365,7 @@ def _select_platform_combo(
     target_platform_budget: int,
     target_ram_gb: int,
     require_igpu: bool = False,
+    prefer_cheapest_cpu: bool = False,
 ) -> tuple[CPU, Motherboard, RAM]:
     """Select compatible (CPU, Motherboard, RAM) combo maximizing performance within budget."""
     candidates = []
@@ -410,7 +411,10 @@ def _select_platform_combo(
 
     within_budget = [c for c in candidates if c["cost"] <= target_platform_budget]
     if within_budget:
-        best = max(within_budget, key=lambda c: c["score"])
+        if prefer_cheapest_cpu:
+            best = min(within_budget, key=lambda c: (c["cpu"].price_usd, c["cost"]))
+        else:
+            best = max(within_budget, key=lambda c: c["score"])
     else:
         best = min(candidates, key=lambda c: c["cost"])
 
@@ -422,6 +426,7 @@ def _select_gpu(
     target_gpu_budget: int,
     profile: str,
     target_resolution: Optional[str] = None,
+    prefer_expensive: bool = False,
 ) -> Optional[GPU]:
     """Select optimal GPU dynamically using a multi-criteria scoring function."""
     if profile == "office":
@@ -433,6 +438,7 @@ def _select_gpu(
         available_gpus = [cheapest_gpu]
 
     def _gpu_score(gpu: GPU) -> float:
+        price_bonus = (gpu.price_usd * 20.0) if prefer_expensive else 0.0
         if profile == "ai_3d":
             # AI workloads value VRAM capacity and CUDA / Tensor Core acceleration
             is_nvidia = (
@@ -441,12 +447,12 @@ def _select_gpu(
                 or "geforce" in gpu.name.lower()
             )
             cuda_weight = 6000.0 if is_nvidia else 0.0
-            return (gpu.vram_gb * 1000.0) + cuda_weight + (gpu.benchmark_score * 0.1)
+            return (gpu.vram_gb * 1000.0) + cuda_weight + (gpu.benchmark_score * 0.1) + price_bonus
         elif profile == "productivity":
-            return float(gpu.benchmark_score) + (gpu.vram_gb * 200.0)
+            return float(gpu.benchmark_score) + (gpu.vram_gb * 200.0) + price_bonus
         else:  # gaming
             vram_bonus = 3000.0 if (target_resolution == "4k" and gpu.vram_gb >= 16) else 0.0
-            return float(gpu.benchmark_score) + vram_bonus
+            return float(gpu.benchmark_score) + vram_bonus + price_bonus
 
     return max(available_gpus, key=_gpu_score)
 
@@ -476,11 +482,34 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
     all_cpus = db.list_cpus()
     all_gpus = db.list_gpus()
 
-    wants_apu = "apu" in requirements.priorities
+    priorities = requirements.priorities or []
+    wants_apu = "apu" in priorities
+
+    # Flags for hardware-specific priorities from LLM or heuristics
+    wants_max_gpu = any(p in priorities for p in [
+        "gpu_expensive", "max_gpu", "high_gpu", "heavy_gpu", "gpu_priority", "cpu_cheap", "cheap_cpu"
+    ])
+    wants_max_cpu = any(p in priorities for p in [
+        "cpu_expensive", "heavy_cpu", "high_cpu", "cpu_priority", "gpu_cheap"
+    ])
+    wants_premium_case = any(p in priorities for p in [
+        "case_aesthetic", "aesthetic", "cool_case", "premium_case", "case_priority", "rgb", "wooden_case"
+    ])
+    wants_premium_cooling = any(p in priorities for p in [
+        "cooling", "liquid_cooling", "aio", "water_cooling", "high_cooling", "quiet", "silent"
+    ])
+
+    # Dynamic component budget shares based on profile and priorities
+    case_share = 0.12 if wants_premium_case else 0.05
+    cooler_share = 0.10 if wants_premium_cooling else 0.03
+    storage_share = 0.08
+
+    # Available budget share for GPU + Platform (CPU, Motherboard, RAM)
+    available_core_share = max(0.50, 1.0 - (case_share + cooler_share + storage_share))
 
     # Check requested RAM
     requested_ram = 16
-    for p in requirements.priorities:
+    for p in priorities:
         if p.startswith("ram_") and p.endswith("gb"):
             try:
                 requested_ram = int(p.split("_")[1].replace("gb", ""))
@@ -489,16 +518,16 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
 
     # Check requested Storage
     requested_storage_gb = None
-    for p in requirements.priorities:
+    for p in priorities:
         if p.startswith("storage_") and p.endswith("gb"):
             try:
                 requested_storage_gb = int(p.split("_")[1].replace("gb", ""))
             except ValueError:
                 pass
 
-    # Determine dynamic budget fractions by profile
+    # Determine dynamic budget fractions by profile and priorities
     if profile == "office" or wants_apu:
-        target_platform_budget = int(adjusted_budget * 0.68)
+        target_platform_budget = int(adjusted_budget * (available_core_share + 0.10))
         target_ram_gb = max(16, requested_ram)
         gpu = None
         cpu, motherboard, ram = _select_platform_combo(
@@ -506,39 +535,51 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
             target_platform_budget=target_platform_budget,
             target_ram_gb=target_ram_gb,
             require_igpu=True,
+            prefer_cheapest_cpu=wants_max_gpu,
         )
     elif profile == "ai_3d":
-        target_gpu_budget = int(adjusted_budget * 0.52)
-        target_platform_budget = int(adjusted_budget * 0.36)
+        target_gpu_budget = int(adjusted_budget * (available_core_share * 0.60))
+        target_platform_budget = int(adjusted_budget * (available_core_share * 0.40))
         target_ram_gb = max(32, requested_ram)
-        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution)
+        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution, prefer_expensive=wants_max_gpu)
         cpu, motherboard, ram = _select_platform_combo(
             all_cpus=all_cpus,
             target_platform_budget=target_platform_budget,
             target_ram_gb=target_ram_gb,
             require_igpu=False,
+            prefer_cheapest_cpu=wants_max_gpu,
         )
     elif profile == "productivity":
-        target_gpu_budget = int(adjusted_budget * 0.22)
-        target_platform_budget = int(adjusted_budget * 0.64)
+        target_gpu_budget = int(adjusted_budget * (available_core_share * 0.30))
+        target_platform_budget = int(adjusted_budget * (available_core_share * 0.70))
         target_ram_gb = max(32, requested_ram)
-        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution)
+        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution, prefer_expensive=wants_max_gpu)
         cpu, motherboard, ram = _select_platform_combo(
             all_cpus=all_cpus,
             target_platform_budget=target_platform_budget,
             target_ram_gb=target_ram_gb,
             require_igpu=False,
+            prefer_cheapest_cpu=wants_max_gpu,
         )
     else:  # gaming
-        target_gpu_budget = int(adjusted_budget * 0.48)
-        target_platform_budget = int(adjusted_budget * 0.38)
+        if wants_max_gpu:
+            target_gpu_budget = int(adjusted_budget * (available_core_share * 0.74))
+            target_platform_budget = int(adjusted_budget * (available_core_share * 0.26))
+        elif wants_max_cpu:
+            target_gpu_budget = int(adjusted_budget * (available_core_share * 0.35))
+            target_platform_budget = int(adjusted_budget * (available_core_share * 0.65))
+        else:
+            target_gpu_budget = int(adjusted_budget * (available_core_share * 0.56))
+            target_platform_budget = int(adjusted_budget * (available_core_share * 0.44))
+
         target_ram_gb = max(16, requested_ram)
-        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution)
+        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution, prefer_expensive=wants_max_gpu)
         cpu, motherboard, ram = _select_platform_combo(
             all_cpus=all_cpus,
             target_platform_budget=target_platform_budget,
             target_ram_gb=target_ram_gb,
             require_igpu=False,
+            prefer_cheapest_cpu=wants_max_gpu,
         )
 
     # 4. Select Storage dynamically by budget allocation & capacity request
@@ -578,13 +619,27 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
         cases = gpu_compatible_cases if gpu_compatible_cases else form_factor_cases
     else:
         cases = form_factor_cases
-    case = cases[0]
+    target_case_budget = max(45, int(adjusted_budget * case_share))
+    if wants_premium_case:
+        affordable_cases = [c for c in cases if c.price_usd <= target_case_budget]
+        case = max(affordable_cases, key=lambda c: c.price_usd) if affordable_cases else cases[0]
+    else:
+        case = cases[0]
 
     # 7. Select Cooler
     coolers = db.list_coolers(socket=cpu.socket, min_tdp_w=cpu.tdp_w)
     if not coolers:
         coolers = db.list_coolers(socket=cpu.socket)
-    cooler = coolers[0] if coolers else None
+
+    target_cooler_budget = max(22, int(adjusted_budget * cooler_share))
+    if wants_premium_cooling:
+        affordable_coolers = [c for c in coolers if c.price_usd <= target_cooler_budget]
+        if affordable_coolers:
+            cooler = max(affordable_coolers, key=lambda c: (c.max_tdp_w, c.price_usd))
+        else:
+            cooler = max(coolers, key=lambda c: c.max_tdp_w) if coolers else None
+    else:
+        cooler = coolers[0] if coolers else None
 
     build = PCBuild(
         cpu=cpu,
@@ -848,6 +903,12 @@ def explain_build_node(state: AgentState) -> Dict[str, Any]:
         f"2. **Platform & Socket:** Socket `{build.cpu.socket}` with `{build.ram.ram_type}` delivers optimal efficiency.",
         f"3. **Power Safety:** `{build.psu.wattage_w}W` power supply provides robust headroom over the peak draw of `{build.estimated_peak_power_w}W`.",
     ])
+
+    priorities = requirements.priorities if requirements else []
+    if any(p in priorities for p in ["gpu_expensive", "max_gpu", "cpu_cheap", "cheap_cpu"]):
+        lines.append("4. **GPU Maximization Bias:** Budget allocation was intentionally shifted heavily toward the GPU tier, pairing it with a cost-efficient CPU.")
+    elif any(p in priorities for p in ["case_aesthetic", "aesthetic", "cooling", "liquid_cooling"]):
+        lines.append("4. **Premium Aesthetics & Thermal Headroom:** Budget allocation prioritized a premium chassis and high-performance cooling per your request.")
 
     if val_result and val_result.issues:
         lines.append("")
