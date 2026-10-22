@@ -3,6 +3,7 @@
 import json
 import re
 from typing import Any, Dict, List, Optional
+import requests
 from langchain_core.messages import HumanMessage, SystemMessage
 from langchain_openai import ChatOpenAI
 
@@ -29,13 +30,63 @@ db = HardwareDatabase(db_path=DB_PATH)
 
 
 def _get_llm() -> Optional[ChatOpenAI]:
-    if OPENAI_API_KEY and len(OPENAI_API_KEY.strip()) > 5:
+    if OPENAI_API_KEY and len(OPENAI_API_KEY.strip()) >= 3:
+        is_local = any(host in OPENAI_BASE_URL.lower() for host in ["localhost", "127.0.0.1", "0.0.0.0"])
         return ChatOpenAI(
             model=OPENAI_MODEL,
             api_key=OPENAI_API_KEY,
             base_url=OPENAI_BASE_URL,
-            temperature=0.2,
+            temperature=0.1,
+            max_tokens=350,
+            max_retries=0 if is_local else 2,
+            timeout=45.0 if is_local else 30.0,
         )
+    return None
+
+
+def _parse_via_ollama_native(query: str) -> Optional[UserRequirements]:
+    """Call Ollama native /api/chat with think=False to disable reasoning/thinking latency."""
+    try:
+        base_host = re.sub(r"/v1/?$", "", OPENAI_BASE_URL)
+        url = base_host.rstrip("/") + "/api/chat"
+        prompt = (
+            "Analyze the PC build request and extract structured requirements as JSON with keys:\n"
+            "- budget_usd (integer in USD)\n"
+            "- resolution (\"1080p\", \"1440p\", \"4k\", or null)\n"
+            "- target_games (list of game titles)\n"
+            "- work_tasks (list of work software/tasks)\n"
+            "- priorities (list of hardware tags like \"ram_32gb\", \"quiet\", \"apu\")\n"
+            "Resolution mapping: 2k/2к -> \"1440p\", 4k/4к -> \"4k\", 1080p/1080р -> \"1080p\".\n"
+            f"User Request: {query}\n"
+            "Output JSON only."
+        )
+        payload = {
+            "model": OPENAI_MODEL,
+            "messages": [{"role": "user", "content": prompt}],
+            "think": False,
+            "stream": False,
+            "options": {"num_predict": 350, "temperature": 0.1},
+        }
+        resp = requests.post(url, json=payload, timeout=15)
+        if resp.status_code == 200:
+            content = resp.json().get("message", {}).get("content", "")
+            clean = re.sub(r"^```(?:json)?\s*", "", content.strip(), flags=re.IGNORECASE)
+            clean = re.sub(r"\s*```$", "", clean)
+            m = re.search(r"\{.*\}", clean, re.DOTALL)
+            if m:
+                data = json.loads(m.group(0))
+                res_val = str(data.get("resolution") or "").lower()
+                if res_val in ["2k", "2к"]:
+                    data["resolution"] = "1440p"
+                elif res_val in ["4k", "4к", "uhd"]:
+                    data["resolution"] = "4k"
+                elif res_val in ["1080p", "1080р", "fhd"]:
+                    data["resolution"] = "1080p"
+                elif res_val not in ["1080p", "1440p", "4k"]:
+                    data["resolution"] = None
+                return UserRequirements.model_validate(data)
+    except Exception:
+        pass
     return None
 
 
@@ -222,45 +273,61 @@ def parse_requirements_node(state: AgentState) -> Dict[str, Any]:
     requirements = None
 
     if llm:
-        # 1. Try structured output (OpenAI / native tool-calling models)
-        try:
-            structured_llm = llm.with_structured_output(UserRequirements)
-            system_prompt = (
-                "You are an expert PC hardware consultant. Analyze the user request (which may be in any language) "
-                "and extract structured requirements in English.\n"
-                "Strict Rules:\n"
-                "1. 'target_games': ONLY real video games (Cyberpunk, CS2, etc.). NEVER software like Blender or Video Editing here. If none, use [].\n"
-                "2. 'resolution': Only set if user explicitly requested a gaming resolution (1080p, 1440p, 4k). Otherwise null.\n"
-                "3. 'priorities': Include tags like 'ram_32gb', 'ram_64gb', 'storage_2000gb', 'quiet', 'apu' when requested.\n"
-                "Infer budget in USD (default 1200)."
-            )
-            res = structured_llm.invoke(
-                [SystemMessage(content=system_prompt), HumanMessage(content=user_query)]
-            )
-            if res and isinstance(res, UserRequirements):
-                requirements = res
-                parser_source = f"Local LLM ({OPENAI_MODEL})"
-        except Exception:
-            pass
+        is_local = any(host in OPENAI_BASE_URL.lower() for host in ["localhost", "127.0.0.1", "0.0.0.0"])
 
-        # 2. Robust direct JSON prompt fallback (works with any local Ollama / LM Studio model)
+        # 1. For local Ollama models on Mac, call native /api/chat with think=False (runs in ~3s instead of reasoning timeouts)
+        if is_local:
+            requirements = _parse_via_ollama_native(user_query)
+            if requirements:
+                parser_source = f"Local LLM ({OPENAI_MODEL})"
+
+        # 2. Try structured output only for remote OpenAI/cloud APIs (Ollama MLX runner throws 501 on tools)
+        if not requirements and not is_local:
+            try:
+                structured_llm = llm.with_structured_output(UserRequirements)
+                system_prompt = (
+                    "You are an expert PC hardware consultant. Analyze the user request (which may be in any language) "
+                    "and extract structured requirements in English.\n"
+                    "Strict Rules:\n"
+                    "1. 'target_games': ONLY real video games (Cyberpunk, CS2, etc.). NEVER software like Blender or Video Editing here. If none, use [].\n"
+                    "2. 'resolution': Only set if user explicitly requested a gaming resolution (1080p, 1440p, 4k). Otherwise null.\n"
+                    "3. 'priorities': Include tags like 'ram_32gb', 'ram_64gb', 'storage_2000gb', 'quiet', 'apu' when requested.\n"
+                    "Infer budget in USD (default 1200)."
+                )
+                res = structured_llm.invoke(
+                    [SystemMessage(content=system_prompt), HumanMessage(content=user_query)]
+                )
+                if res and isinstance(res, UserRequirements):
+                    requirements = res
+                    parser_source = f"Remote LLM ({OPENAI_MODEL})"
+            except Exception:
+                pass
+
+        # 3. Direct JSON prompt fallback
         if not requirements:
             try:
                 prompt = (
-                    "You are an expert PC hardware consultant. Analyze the user request (in any language) "
-                    "and extract requirements into a single English JSON object matching this schema:\n"
+                    "You are an expert PC hardware parser. Analyze the user request (in any language) "
+                    "and output ONLY a single valid JSON object matching this schema, with NO extra words, explanations, or markdown fences:\n"
                     "{\n"
-                    '  "budget_usd": integer (budget in USD, default 1200),\n'
-                    '  "resolution": "1080p", "1440p", "4k", or null,\n'
-                    '  "target_games": [list of video games, or []],\n'
-                    '  "work_tasks": [list of work tasks like "blender", "video editing", "programming", "office"],\n'
-                    '  "priorities": [list of tags like "ram_32gb", "storage_2000gb", "quiet", "apu"]\n'
+                    '  "budget_usd": integer,\n'
+                    '  "resolution": "1080p" or "1440p" or "4k" or null,\n'
+                    '  "target_games": [list of video games],\n'
+                    '  "work_tasks": [list of tasks like "blender", "video editing", "programming", "office"],\n'
+                    '  "priorities": [tags like "ram_32gb", "storage_2000gb", "quiet", "apu"]\n'
                     "}\n"
-                    "Output ONLY the raw JSON object."
+                    "Rules for resolution:\n"
+                    "- 2k, 2к, 1440p, 1440р -> \"1440p\"\n"
+                    "- 4k, 4к, 2160p, uhd -> \"4k\"\n"
+                    "- 1080p, 1080р, fhd -> \"1080p\"\n"
+                    "Start your response immediately with '{' and output strictly raw JSON."
                 )
                 resp = llm.invoke([SystemMessage(content=prompt), HumanMessage(content=user_query)])
                 content = resp.content.strip() if hasattr(resp, "content") else str(resp)
-                m = re.search(r"\{.*\}", content, re.DOTALL)
+                # Strip markdown codeblocks if wrapped
+                clean_content = re.sub(r"^```(?:json)?\s*", "", content, flags=re.IGNORECASE)
+                clean_content = re.sub(r"\s*```$", "", clean_content)
+                m = re.search(r"\{.*\}", clean_content, re.DOTALL)
                 if m:
                     data = json.loads(m.group(0))
                     requirements = UserRequirements.model_validate(data)

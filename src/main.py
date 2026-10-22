@@ -9,9 +9,14 @@ ROOT_DIR = Path(__file__).resolve().parent.parent
 if str(ROOT_DIR) not in sys.path:
     sys.path.insert(0, str(ROOT_DIR))
 
-venv_site = ROOT_DIR / ".venv" / "Lib" / "site-packages"
-if venv_site.exists() and str(venv_site) not in sys.path:
-    sys.path.insert(0, str(venv_site))
+# Cross-platform support for .venv site-packages (Windows, macOS, Linux)
+venv_site_candidates = [
+    ROOT_DIR / ".venv" / "Lib" / "site-packages",
+    *(ROOT_DIR / ".venv" / "lib").glob("python*/site-packages"),
+]
+for venv_site in venv_site_candidates:
+    if venv_site.exists() and str(venv_site) not in sys.path:
+        sys.path.insert(0, str(venv_site))
 
 # Force UTF-8 output on Windows to support emoji / box-drawing characters
 if sys.stdout.encoding and sys.stdout.encoding.lower() != "utf-8":
