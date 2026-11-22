@@ -83,6 +83,25 @@ def run_agent(query: str):
             f"[bold yellow]🖥️ Target Resolution:[/bold yellow] {res_str}",
             f"[bold yellow]⚡ Hardware Priorities:[/bold yellow] {priorities_str}",
         ]
+
+        if req.budget_weights:
+            weights_str = " | ".join(
+                f"{k.upper()}: {int(round(v * 100))}%"
+                for k, v in req.budget_weights.items()
+                if isinstance(v, (int, float)) and v > 0
+            )
+            if weights_str:
+                log_lines.append(f"[bold yellow]📊 Budget Allocation:[/bold yellow] [cyan]{weights_str}[/cyan]")
+
+        style_flags = []
+        if req.silence_focus:
+            style_flags.append("Silent Focus 🤫")
+        if req.prefer_liquid_cooler:
+            style_flags.append("Liquid AIO Cooling 💧")
+        if req.prefer_aesthetic_case:
+            style_flags.append("Showcase / Premium Case ✨")
+        if style_flags:
+            log_lines.append(f"[bold yellow]🎨 Hardware Style:[/bold yellow] [magenta]{', '.join(style_flags)}[/magenta]")
         console.print(
             Panel(
                 "\n".join(log_lines),

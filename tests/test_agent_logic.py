@@ -543,3 +543,56 @@ def test_cli_main_execution():
         pytest.fail(f"run_agent raised an unexpected exception: {exc}")
 
 
+def test_dynamic_budget_weights_gpu_skew():
+    """Verify that custom budget weights (e.g. 70% GPU, 15% platform) skew component selection."""
+    from src.agent.nodes import plan_and_select_node
+
+    req_balanced = UserRequirements(budget_usd=1500, resolution="1440p")
+    state_balanced = {
+        "user_query": "gaming pc 1500",
+        "requirements": req_balanced,
+        "iteration_count": 0,
+        "feedback_history": [],
+    }
+    build_balanced = plan_and_select_node(state_balanced)["current_build"]
+
+    req_gpu_skew = UserRequirements(
+        budget_usd=1500,
+        resolution="1440p",
+        budget_weights={"gpu": 0.70, "platform": 0.15, "case": 0.05, "cooler": 0.03, "storage": 0.07},
+    )
+    state_gpu_skew = {
+        "user_query": "expensive gpu cheap cpu 1500",
+        "requirements": req_gpu_skew,
+        "iteration_count": 0,
+        "feedback_history": [],
+    }
+    build_gpu_skew = plan_and_select_node(state_gpu_skew)["current_build"]
+
+    # GPU-heavy build should prioritize GPU budget over CPU budget
+    assert build_gpu_skew.gpu.price_usd >= build_balanced.gpu.price_usd
+    assert build_gpu_skew.cpu.price_usd <= build_balanced.cpu.price_usd
+
+
+def test_custom_case_and_cooler_preferences():
+    """Verify that aesthetic case and liquid cooler flags select premium aesthetic hardware."""
+    from src.agent.nodes import plan_and_select_node
+
+    req = UserRequirements(
+        budget_usd=1500,
+        prefer_aesthetic_case=True,
+        prefer_liquid_cooler=True,
+        budget_weights={"gpu": 0.40, "platform": 0.30, "case": 0.15, "cooler": 0.10, "storage": 0.05},
+    )
+    state = {
+        "user_query": "cool pc with nice case and aio liquid cooler",
+        "requirements": req,
+        "iteration_count": 0,
+        "feedback_history": [],
+    }
+    build = plan_and_select_node(state)["current_build"]
+    assert any(term in build.cooler.name.lower() for term in ["liquid", "aio", "freezer"])
+    assert build.case.price_usd >= 90
+
+
+

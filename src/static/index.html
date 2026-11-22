@@ -1,0 +1,632 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>HardwarePC Agent — AI PC Builder</title>
+  <style>
+    :root {
+      --bg-primary: #0d1117;
+      --bg-secondary: #161b22;
+      --bg-tertiary: #1f2630;
+      --border-color: #30363d;
+      --text-primary: #e6edf3;
+      --text-secondary: #8b949e;
+      --accent: #3b82f6;
+      --accent-hover: #2563eb;
+      --user-bubble: #1d4ed8;
+      --success: #22c55e;
+      --warning: #eab308;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Inter, sans-serif;
+      background-color: var(--bg-primary);
+      color: var(--text-primary);
+      height: 100vh;
+      display: flex;
+      flex-direction: column;
+      overflow: hidden;
+    }
+
+    header {
+      background-color: var(--bg-secondary);
+      border-bottom: 1px solid var(--border-color);
+      padding: 14px 24px;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      flex-shrink: 0;
+    }
+
+    .brand {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .brand-icon {
+      font-size: 24px;
+    }
+
+    .brand-title {
+      font-size: 18px;
+      font-weight: 700;
+      letter-spacing: -0.02em;
+    }
+
+    .brand-sub {
+      font-size: 12px;
+      color: var(--text-secondary);
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--success);
+      background: rgba(34, 197, 94, 0.12);
+      border: 1px solid rgba(34, 197, 94, 0.3);
+      padding: 5px 10px;
+      border-radius: 999px;
+    }
+
+    .status-dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background-color: var(--success);
+    }
+
+    main {
+      flex: 1;
+      overflow-y: auto;
+      padding: 24px 16px;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+    }
+
+    .chat-container {
+      width: 100%;
+      max-width: 900px;
+      display: flex;
+      flex-direction: column;
+      gap: 20px;
+    }
+
+    .welcome-card {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-radius: 16px;
+      padding: 24px;
+      text-align: center;
+    }
+
+    .welcome-card h2 {
+      font-size: 20px;
+      margin-bottom: 8px;
+    }
+
+    .welcome-card p {
+      color: var(--text-secondary);
+      font-size: 14px;
+      margin-bottom: 18px;
+      line-height: 1.5;
+    }
+
+    .examples {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      justify-content: center;
+    }
+
+    .example-chip {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      color: var(--text-primary);
+      padding: 8px 14px;
+      border-radius: 999px;
+      font-size: 13px;
+      cursor: pointer;
+      transition: all 0.15s ease;
+    }
+
+    .example-chip:hover {
+      border-color: var(--accent);
+      background: rgba(59, 130, 246, 0.12);
+    }
+
+    .message {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      animation: fadeIn 0.2s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    .message.user {
+      align-items: flex-end;
+    }
+
+    .message.assistant {
+      align-items: flex-start;
+    }
+
+    .bubble {
+      max-width: 100%;
+      padding: 14px 18px;
+      border-radius: 14px;
+      line-height: 1.6;
+      font-size: 14.5px;
+    }
+
+    .message.user .bubble {
+      background: var(--user-bubble);
+      color: #ffffff;
+      border-bottom-right-radius: 4px;
+      max-width: 80%;
+      white-space: pre-wrap;
+    }
+
+    .message.assistant .bubble {
+      background: var(--bg-secondary);
+      border: 1px solid var(--border-color);
+      border-bottom-left-radius: 4px;
+      width: 100%;
+    }
+
+    /* Recognition Meta Card */
+    .meta-card {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      border-left: 3px solid var(--success);
+      border-radius: 10px;
+      padding: 10px 14px;
+      margin-bottom: 14px;
+      font-size: 12.5px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 14px;
+      align-items: center;
+    }
+
+    .meta-item {
+      display: inline-flex;
+      align-items: center;
+      gap: 5px;
+      color: var(--text-secondary);
+    }
+
+    .meta-item strong {
+      color: var(--text-primary);
+      font-weight: 600;
+    }
+
+    /* Markdown Styling inside Assistant Bubble */
+    .md h2 {
+      font-size: 18px;
+      margin: 4px 0 10px;
+      color: #ffffff;
+    }
+
+    .md h3 {
+      font-size: 15.5px;
+      margin: 16px 0 8px;
+      color: #93c5fd;
+    }
+
+    .md p {
+      margin: 6px 0;
+    }
+
+    .md code {
+      background: var(--bg-tertiary);
+      border: 1px solid var(--border-color);
+      padding: 2px 6px;
+      border-radius: 5px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+      font-size: 13px;
+      color: #7dd3fc;
+    }
+
+    .md ul, .md ol {
+      margin: 6px 0 6px 20px;
+    }
+
+    .md li {
+      margin: 4px 0;
+    }
+
+    .md blockquote {
+      border-left: 3px solid var(--warning);
+      background: rgba(234, 179, 8, 0.08);
+      padding: 8px 12px;
+      margin: 10px 0;
+      border-radius: 0 8px 8px 0;
+      font-size: 13.5px;
+    }
+
+    .table-wrap {
+      overflow-x: auto;
+      margin: 10px 0;
+      border: 1px solid var(--border-color);
+      border-radius: 10px;
+    }
+
+    .md table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13.5px;
+    }
+
+    .md th, .md td {
+      padding: 9px 12px;
+      text-align: left;
+      border-bottom: 1px solid var(--border-color);
+    }
+
+    .md th {
+      background: var(--bg-tertiary);
+      font-weight: 600;
+      color: #93c5fd;
+    }
+
+    .md tr:last-child td {
+      border-bottom: none;
+    }
+
+    .loading-dots {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      color: var(--text-secondary);
+      font-size: 14px;
+    }
+
+    .spinner {
+      width: 16px;
+      height: 16px;
+      border: 2px solid var(--border-color);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.8s linear infinite;
+    }
+
+    @keyframes spin {
+      to { transform: rotate(360deg); }
+    }
+
+    footer {
+      background: var(--bg-secondary);
+      border-top: 1px solid var(--border-color);
+      padding: 14px 16px;
+      display: flex;
+      justify-content: center;
+      flex-shrink: 0;
+    }
+
+    .input-form {
+      width: 100%;
+      max-width: 900px;
+      display: flex;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    textarea {
+      flex: 1;
+      background: var(--bg-primary);
+      border: 1px solid var(--border-color);
+      border-radius: 12px;
+      color: var(--text-primary);
+      padding: 12px 14px;
+      font-family: inherit;
+      font-size: 14.5px;
+      resize: none;
+      min-height: 48px;
+      max-height: 160px;
+      line-height: 1.4;
+      outline: none;
+      transition: border-color 0.15s ease;
+    }
+
+    textarea:focus {
+      border-color: var(--accent);
+    }
+
+    button.send-btn {
+      background: var(--accent);
+      color: #ffffff;
+      border: none;
+      border-radius: 12px;
+      padding: 0 20px;
+      height: 48px;
+      font-size: 14.5px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.15s ease;
+      flex-shrink: 0;
+    }
+
+    button.send-btn:hover:not(:disabled) {
+      background: var(--accent-hover);
+    }
+
+    button.send-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+  </style>
+</head>
+<body>
+  <header>
+    <div class="brand">
+      <span class="brand-icon">🤖</span>
+      <div>
+        <div class="brand-title">HardwarePC Agent</div>
+        <div class="brand-sub">LangGraph + Local LLM + Deterministic Compatibility Engine</div>
+      </div>
+    </div>
+    <div class="status-badge">
+      <span class="status-dot"></span>
+      <span>Online</span>
+    </div>
+  </header>
+
+  <main id="scrollArea">
+    <div class="chat-container" id="chatContainer">
+      <div class="welcome-card" id="welcomeCard">
+        <h2>Custom PC Builder with Compatibility Verification</h2>
+        <p>
+          Describe the PC you want in any language: budget, target games, workloads,
+          silence or aesthetic preferences, or GPU/CPU priorities.
+        </p>
+        <div class="examples">
+          <button class="example-chip" onclick="useExample(this)">Gaming PC for Cyberpunk at 2K, budget $1200</button>
+          <button class="example-chip" onclick="useExample(this)">70% budget in GPU, cheapest CPU, budget $1500</button>
+          <button class="example-chip" onclick="useExample(this)">Quiet workstation for video editing, budget $2000</button>
+          <button class="example-chip" onclick="useExample(this)">Cool PC with a showcase case and liquid AIO cooler</button>
+        </div>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <form class="input-form" id="chatForm">
+      <textarea
+        id="queryInput"
+        rows="1"
+        placeholder="Describe your build, e.g.: Quiet 1440p gaming PC for $1500..."
+        required
+      ></textarea>
+      <button type="submit" class="send-btn" id="sendBtn">Send</button>
+    </form>
+  </footer>
+
+  <script>
+    const chatContainer = document.getElementById("chatContainer");
+    const scrollArea = document.getElementById("scrollArea");
+    const chatForm = document.getElementById("chatForm");
+    const queryInput = document.getElementById("queryInput");
+    const sendBtn = document.getElementById("sendBtn");
+
+    function scrollToBottom() {
+      scrollArea.scrollTop = scrollArea.scrollHeight;
+    }
+
+    function escapeHtml(str) {
+      return str
+        .replace(/&/g, "&amp;")
+        .replace(/</g, "&lt;")
+        .replace(/>/g, "&gt;")
+        .replace(/"/g, "&quot;");
+    }
+
+    function formatInline(text) {
+      let out = escapeHtml(text);
+      out = out.replace(/`([^`]+)`/g, "<code>$1</code>");
+      out = out.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
+      out = out.replace(/\*([^*]+)\*/g, "<em>$1</em>");
+      return out;
+    }
+
+    function renderMarkdown(md) {
+      const lines = md.split(/\r?\n/);
+      let html = "";
+      let inUl = false;
+      let inOl = false;
+      let inTable = false;
+      let tableHeaderDone = false;
+
+      function closeLists() {
+        if (inUl) { html += "</ul>"; inUl = false; }
+        if (inOl) { html += "</ol>"; inOl = false; }
+      }
+
+      function closeTable() {
+        if (inTable) { html += "</tbody></table></div>"; inTable = false; tableHeaderDone = false; }
+      }
+
+      for (let i = 0; i < lines.length; i++) {
+        const raw = lines[i];
+        const line = raw.trim();
+
+        if (!line) {
+          closeLists();
+          closeTable();
+          continue;
+        }
+
+        // Table row
+        if (line.startsWith("|") && line.endsWith("|")) {
+          closeLists();
+          const cells = line.slice(1, -1).split("|").map(c => c.trim());
+          // Separator row | :--- | :--- |
+          if (cells.every(c => /^:?-{2,}:?$/.test(c))) {
+            tableHeaderDone = true;
+            continue;
+          }
+          if (!inTable) {
+            html += '<div class="table-wrap"><table><thead><tr>';
+            cells.forEach(c => { html += `<th>${formatInline(c)}</th>`; });
+            html += "</tr></thead><tbody>";
+            inTable = true;
+            tableHeaderDone = false;
+          } else {
+            html += "<tr>";
+            cells.forEach(c => { html += `<td>${formatInline(c)}</td>`; });
+            html += "</tr>";
+          }
+          continue;
+        } else {
+          closeTable();
+        }
+
+        if (line.startsWith("### ")) {
+          closeLists();
+          html += `<h3>${formatInline(line.slice(4))}</h3>`;
+        } else if (line.startsWith("## ")) {
+          closeLists();
+          html += `<h2>${formatInline(line.slice(3))}</h2>`;
+        } else if (line.startsWith("> ")) {
+          closeLists();
+          html += `<blockquote>${formatInline(line.slice(2))}</blockquote>`;
+        } else if (/^[-*] /.test(line)) {
+          if (inOl) { html += "</ol>"; inOl = false; }
+          if (!inUl) { html += "<ul>"; inUl = true; }
+          html += `<li>${formatInline(line.slice(2))}</li>`;
+        } else if (/^\d+\.\s+/.test(line)) {
+          if (inUl) { html += "</ul>"; inUl = false; }
+          if (!inOl) { html += "<ol>"; inOl = true; }
+          html += `<li>${formatInline(line.replace(/^\d+\.\s+/, ""))}</li>`;
+        } else {
+          closeLists();
+          html += `<p>${formatInline(line)}</p>`;
+        }
+      }
+
+      closeLists();
+      closeTable();
+      return html;
+    }
+
+    function buildMetaHtml(meta) {
+      if (!meta) return "";
+      const items = [];
+      items.push(`<span class="meta-item">⚙️ <strong>${escapeHtml(meta.parser_source)}</strong></span>`);
+      items.push(`<span class="meta-item">🎯 <strong>${escapeHtml(meta.profile_label)}</strong></span>`);
+      if (meta.budget_usd) {
+        items.push(`<span class="meta-item">💰 <strong>$${meta.budget_usd.toLocaleString()}</strong></span>`);
+      }
+      if (meta.resolution && meta.resolution !== "Auto") {
+        items.push(`<span class="meta-item">🖥️ <strong>${escapeHtml(meta.resolution)}</strong></span>`);
+      }
+      if (meta.budget_weights) {
+        const w = Object.entries(meta.budget_weights)
+          .filter(([, v]) => typeof v === "number" && v > 0)
+          .map(([k, v]) => `${k.toUpperCase()}: ${Math.round(v * 100)}%`)
+          .join(" | ");
+        if (w) {
+          items.push(`<span class="meta-item">📊 <strong>${escapeHtml(w)}</strong></span>`);
+        }
+      }
+      const styles = [];
+      if (meta.silence_focus) styles.push("Silent Focus 🤫");
+      if (meta.prefer_liquid_cooler) styles.push("Liquid AIO Cooling 💧");
+      if (meta.prefer_aesthetic_case) styles.push("Showcase Case ✨");
+      if (styles.length > 0) {
+        items.push(`<span class="meta-item">🎨 <strong>${escapeHtml(styles.join(", "))}</strong></span>`);
+      }
+      return `<div class="meta-card">${items.join("")}</div>`;
+    }
+
+    function appendMessage(role, contentHtml) {
+      const msg = document.createElement("div");
+      msg.className = `message ${role}`;
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      bubble.innerHTML = contentHtml;
+      msg.appendChild(bubble);
+      chatContainer.appendChild(msg);
+      scrollToBottom();
+      return msg;
+    }
+
+    async function sendQuery(query) {
+      const trimmed = query.trim();
+      if (!trimmed) return;
+
+      const welcome = document.getElementById("welcomeCard");
+      if (welcome) welcome.style.display = "none";
+
+      appendMessage("user", escapeHtml(trimmed));
+      queryInput.value = "";
+      queryInput.style.height = "auto";
+      sendBtn.disabled = true;
+
+      const loadingMsg = appendMessage(
+        "assistant",
+        '<div class="loading-dots"><span class="spinner"></span><span>Analyzing requirements and verifying hardware compatibility...</span></div>'
+      );
+
+      try {
+        const res = await fetch("/api/chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ query: trimmed }),
+        });
+
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
+        }
+
+        const data = await res.json();
+        const metaHtml = buildMetaHtml(data.meta);
+        const bodyHtml = `<div class="md">${renderMarkdown(data.response || "")}</div>`;
+        loadingMsg.querySelector(".bubble").innerHTML = metaHtml + bodyHtml;
+      } catch (err) {
+        loadingMsg.querySelector(".bubble").innerHTML =
+          `<p style="color:#f87171;">❌ Error processing request: ${escapeHtml(err.message)}</p>`;
+      } finally {
+        sendBtn.disabled = false;
+        queryInput.focus();
+        scrollToBottom();
+      }
+    }
+
+    function useExample(btn) {
+      sendQuery(btn.textContent);
+    }
+
+    chatForm.addEventListener("submit", (e) => {
+      e.preventDefault();
+      sendQuery(queryInput.value);
+    });
+
+    queryInput.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        sendQuery(queryInput.value);
+      }
+    });
+
+    queryInput.addEventListener("input", () => {
+      queryInput.style.height = "auto";
+      queryInput.style.height = Math.min(queryInput.scrollHeight, 160) + "px";
+    });
+  </script>
+</body>
+</html>

@@ -29,9 +29,15 @@ from src.rules.compatibility import validate_pc_build
 db = HardwareDatabase(db_path=DB_PATH)
 
 
+def _is_ollama_endpoint() -> bool:
+    """Detect whether OPENAI_BASE_URL points to a local or containerized Ollama instance."""
+    url_lower = OPENAI_BASE_URL.lower()
+    return any(host in url_lower for host in ["localhost", "127.0.0.1", "0.0.0.0", "ollama", ":11434"])
+
+
 def _get_llm() -> Optional[ChatOpenAI]:
     if OPENAI_API_KEY and len(OPENAI_API_KEY.strip()) >= 3:
-        is_local = any(host in OPENAI_BASE_URL.lower() for host in ["localhost", "127.0.0.1", "0.0.0.0"])
+        is_local = _is_ollama_endpoint()
         return ChatOpenAI(
             model=OPENAI_MODEL,
             api_key=OPENAI_API_KEY,
@@ -51,12 +57,23 @@ def _parse_via_ollama_native(query: str) -> Optional[UserRequirements]:
         url = base_host.rstrip("/") + "/api/chat"
         prompt = (
             "Analyze the PC build request and extract structured requirements as JSON with keys:\n"
-            "- budget_usd (integer in USD)\n"
+            "- budget_usd (integer in USD, default 1200)\n"
             "- resolution (\"1080p\", \"1440p\", \"4k\", or null)\n"
             "- target_games (list of game titles)\n"
             "- work_tasks (list of work software/tasks)\n"
-            "- priorities (list of hardware tags like \"ram_32gb\", \"quiet\", \"apu\")\n"
-            "Resolution mapping: 2k/2к -> \"1440p\", 4k/4к -> \"4k\", 1080p/1080р -> \"1080p\".\n"
+            "- priorities (list of tags)\n"
+            "- budget_weights: object with fractions summing to 1.0:\n"
+            "    {\"gpu\": float, \"platform\": float, \"case\": float, \"cooler\": float, \"storage\": float}\n"
+            "    (Guidelines: normal gaming = gpu 0.52, platform 0.35, case 0.05, cooler 0.03, storage 0.05.\n"
+            "     If user asks for expensive GPU / cheap CPU: shift to gpu 0.70, platform 0.15.\n"
+            "     If user asks for expensive CPU / cheap GPU: shift to gpu 0.25, platform 0.60.\n"
+            "     If user asks for fancy case / aesthetics: increase case to 0.12 - 0.20.\n"
+            "     If user asks for liquid cooling / cool temps: increase cooler to 0.10 - 0.15.\n"
+            "     If user specifies custom percentages like 70% in GPU: follow user's exact allocation).\n"
+            "- prefer_liquid_cooler (boolean, true if liquid/water/aio cooling requested)\n"
+            "- prefer_aesthetic_case (boolean, true if cool/premium/aesthetic/rgb case requested)\n"
+            "- silence_focus (boolean, true if quiet/silent requested)\n"
+            "Resolution mapping: 2k/qhd -> \"1440p\", 4k/uhd -> \"4k\", 1080p/fhd -> \"1080p\".\n"
             f"User Request: {query}\n"
             "Output JSON only."
         )
@@ -76,11 +93,11 @@ def _parse_via_ollama_native(query: str) -> Optional[UserRequirements]:
             if m:
                 data = json.loads(m.group(0))
                 res_val = str(data.get("resolution") or "").lower()
-                if res_val in ["2k", "2к"]:
+                if res_val in ["2k", "qhd"]:
                     data["resolution"] = "1440p"
-                elif res_val in ["4k", "4к", "uhd"]:
+                elif res_val in ["4k", "uhd"]:
                     data["resolution"] = "4k"
-                elif res_val in ["1080p", "1080р", "fhd"]:
+                elif res_val in ["1080p", "fhd"]:
                     data["resolution"] = "1080p"
                 elif res_val not in ["1080p", "1440p", "4k"]:
                     data["resolution"] = None
@@ -216,6 +233,10 @@ def _heuristic_parse_requirements(query: str) -> UserRequirements:
         target_games=games,
         work_tasks=tasks,
         priorities=priorities,
+        budget_weights=None,
+        silence_focus="quiet" in priorities,
+        prefer_liquid_cooler=any(k in clean_q for k in ["water", "liquid", "aio"]),
+        prefer_aesthetic_case=any(k in clean_q for k in ["rgb", "aesthetic", "glass", "wooden"]),
     )
 
 
@@ -273,7 +294,7 @@ def parse_requirements_node(state: AgentState) -> Dict[str, Any]:
     requirements = None
 
     if llm:
-        is_local = any(host in OPENAI_BASE_URL.lower() for host in ["localhost", "127.0.0.1", "0.0.0.0"])
+        is_local = _is_ollama_endpoint()
 
         # 1. For local Ollama models on Mac, call native /api/chat with think=False (runs in ~3s instead of reasoning timeouts)
         if is_local:
@@ -317,9 +338,9 @@ def parse_requirements_node(state: AgentState) -> Dict[str, Any]:
                     '  "priorities": [tags like "ram_32gb", "storage_2000gb", "quiet", "apu"]\n'
                     "}\n"
                     "Rules for resolution:\n"
-                    "- 2k, 2к, 1440p, 1440р -> \"1440p\"\n"
-                    "- 4k, 4к, 2160p, uhd -> \"4k\"\n"
-                    "- 1080p, 1080р, fhd -> \"1080p\"\n"
+                    "- 2k, 1440p, qhd -> \"1440p\"\n"
+                    "- 4k, 2160p, uhd -> \"4k\"\n"
+                    "- 1080p, fhd -> \"1080p\"\n"
                     "Start your response immediately with '{' and output strictly raw JSON."
                 )
                 resp = llm.invoke([SystemMessage(content=prompt), HumanMessage(content=user_query)])
@@ -483,29 +504,33 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
     all_gpus = db.list_gpus()
 
     priorities = requirements.priorities or []
+    weights = requirements.budget_weights or {}
     wants_apu = "apu" in priorities
 
-    # Flags for hardware-specific priorities from LLM or heuristics
-    wants_max_gpu = any(p in priorities for p in [
-        "gpu_expensive", "max_gpu", "high_gpu", "heavy_gpu", "gpu_priority", "cpu_cheap", "cheap_cpu"
-    ])
-    wants_max_cpu = any(p in priorities for p in [
-        "cpu_expensive", "heavy_cpu", "high_cpu", "cpu_priority", "gpu_cheap"
-    ])
-    wants_premium_case = any(p in priorities for p in [
-        "case_aesthetic", "aesthetic", "cool_case", "premium_case", "case_priority", "rgb", "wooden_case"
-    ])
-    wants_premium_cooling = any(p in priorities for p in [
-        "cooling", "liquid_cooling", "aio", "water_cooling", "high_cooling", "quiet", "silent"
-    ])
+    # Flags for hardware-specific preferences
+    wants_premium_case = (
+        requirements.prefer_aesthetic_case
+        or (weights.get("case", 0) >= 0.08)
+        or any(p in priorities for p in ["case_aesthetic", "aesthetic", "cool_case", "premium_case", "rgb"])
+    )
+    wants_premium_cooling = (
+        requirements.prefer_liquid_cooler
+        or requirements.silence_focus
+        or (weights.get("cooler", 0) >= 0.07)
+        or any(p in priorities for p in ["cooling", "liquid_cooling", "aio", "water_cooling", "quiet", "silent"])
+    )
 
-    # Dynamic component budget shares based on profile and priorities
-    case_share = 0.12 if wants_premium_case else 0.05
-    cooler_share = 0.10 if wants_premium_cooling else 0.03
-    storage_share = 0.08
+    # Dynamic component budget shares based on LLM weights or fallbacks
+    case_share = weights.get("case") if "case" in weights else (0.12 if wants_premium_case else 0.05)
+    cooler_share = weights.get("cooler") if "cooler" in weights else (0.10 if wants_premium_cooling else 0.03)
+    storage_share = weights.get("storage", 0.08)
 
     # Available budget share for GPU + Platform (CPU, Motherboard, RAM)
-    available_core_share = max(0.50, 1.0 - (case_share + cooler_share + storage_share))
+    available_core_share = max(0.40, 1.0 - (case_share + cooler_share + storage_share))
+
+    # Core weights
+    gpu_w = weights.get("gpu")
+    platform_w = weights.get("platform")
 
     # Check requested RAM
     requested_ram = 16
@@ -525,7 +550,7 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
             except ValueError:
                 pass
 
-    # Determine dynamic budget fractions by profile and priorities
+    # Determine dynamic budget fractions by profile and weights
     if profile == "office" or wants_apu:
         target_platform_budget = int(adjusted_budget * (available_core_share + 0.10))
         target_ram_gb = max(16, requested_ram)
@@ -535,51 +560,44 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
             target_platform_budget=target_platform_budget,
             target_ram_gb=target_ram_gb,
             require_igpu=True,
-            prefer_cheapest_cpu=wants_max_gpu,
+            prefer_cheapest_cpu=False,
         )
-    elif profile == "ai_3d":
-        target_gpu_budget = int(adjusted_budget * (available_core_share * 0.60))
-        target_platform_budget = int(adjusted_budget * (available_core_share * 0.40))
-        target_ram_gb = max(32, requested_ram)
-        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution, prefer_expensive=wants_max_gpu)
-        cpu, motherboard, ram = _select_platform_combo(
-            all_cpus=all_cpus,
-            target_platform_budget=target_platform_budget,
-            target_ram_gb=target_ram_gb,
-            require_igpu=False,
-            prefer_cheapest_cpu=wants_max_gpu,
-        )
-    elif profile == "productivity":
-        target_gpu_budget = int(adjusted_budget * (available_core_share * 0.30))
-        target_platform_budget = int(adjusted_budget * (available_core_share * 0.70))
-        target_ram_gb = max(32, requested_ram)
-        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution, prefer_expensive=wants_max_gpu)
-        cpu, motherboard, ram = _select_platform_combo(
-            all_cpus=all_cpus,
-            target_platform_budget=target_platform_budget,
-            target_ram_gb=target_ram_gb,
-            require_igpu=False,
-            prefer_cheapest_cpu=wants_max_gpu,
-        )
-    else:  # gaming
-        if wants_max_gpu:
-            target_gpu_budget = int(adjusted_budget * (available_core_share * 0.74))
-            target_platform_budget = int(adjusted_budget * (available_core_share * 0.26))
-        elif wants_max_cpu:
-            target_gpu_budget = int(adjusted_budget * (available_core_share * 0.35))
-            target_platform_budget = int(adjusted_budget * (available_core_share * 0.65))
-        else:
+    else:
+        if gpu_w is not None and platform_w is not None:
+            total_pair = gpu_w + platform_w
+            if total_pair > 0:
+                norm_gpu = gpu_w / total_pair
+                norm_platform = platform_w / total_pair
+            else:
+                norm_gpu, norm_platform = 0.58, 0.42
+            target_gpu_budget = max(120, int(adjusted_budget * (available_core_share * norm_gpu)))
+            target_platform_budget = max(180, int(adjusted_budget * (available_core_share * norm_platform)))
+        elif profile == "ai_3d":
+            target_gpu_budget = int(adjusted_budget * (available_core_share * 0.60))
+            target_platform_budget = int(adjusted_budget * (available_core_share * 0.40))
+        elif profile == "productivity":
+            target_gpu_budget = int(adjusted_budget * (available_core_share * 0.30))
+            target_platform_budget = int(adjusted_budget * (available_core_share * 0.70))
+        else:  # gaming
             target_gpu_budget = int(adjusted_budget * (available_core_share * 0.56))
             target_platform_budget = int(adjusted_budget * (available_core_share * 0.44))
 
-        target_ram_gb = max(16, requested_ram)
-        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution, prefer_expensive=wants_max_gpu)
+        # Check if CPU should be prioritized as cheapest to maximize GPU
+        prefer_cheapest_cpu = (target_gpu_budget > target_platform_budget * 2.2) or any(
+            p in priorities for p in ["cpu_cheap", "cheap_cpu"]
+        )
+        prefer_expensive_gpu = (target_gpu_budget > target_platform_budget * 1.6) or any(
+            p in priorities for p in ["gpu_expensive", "max_gpu"]
+        )
+
+        target_ram_gb = max(32 if profile in ["ai_3d", "productivity"] else 16, requested_ram)
+        gpu = _select_gpu(all_gpus, target_gpu_budget, profile, requirements.resolution, prefer_expensive=prefer_expensive_gpu)
         cpu, motherboard, ram = _select_platform_combo(
             all_cpus=all_cpus,
             target_platform_budget=target_platform_budget,
             target_ram_gb=target_ram_gb,
             require_igpu=False,
-            prefer_cheapest_cpu=wants_max_gpu,
+            prefer_cheapest_cpu=prefer_cheapest_cpu,
         )
 
     # 4. Select Storage dynamically by budget allocation & capacity request
@@ -631,13 +649,23 @@ def plan_and_select_node(state: AgentState) -> Dict[str, Any]:
     if not coolers:
         coolers = db.list_coolers(socket=cpu.socket)
 
+    # Ensure cooler fits within selected case height clearance
+    fitting_coolers = [c for c in coolers if c.height_mm <= case.max_cooler_height_mm]
+    if fitting_coolers:
+        coolers = fitting_coolers
+
     target_cooler_budget = max(22, int(adjusted_budget * cooler_share))
     if wants_premium_cooling:
         affordable_coolers = [c for c in coolers if c.price_usd <= target_cooler_budget]
-        if affordable_coolers:
-            cooler = max(affordable_coolers, key=lambda c: (c.max_tdp_w, c.price_usd))
+        pool = affordable_coolers if affordable_coolers else coolers
+        if requirements.prefer_liquid_cooler:
+            liquid_coolers = [c for c in pool if any(kw in c.name.lower() for kw in ["liquid", "aio", "freezer"])]
+            cooler = max(liquid_coolers, key=lambda c: (c.max_tdp_w, c.price_usd)) if liquid_coolers else max(pool, key=lambda c: (c.max_tdp_w, c.price_usd))
+        elif requirements.silence_focus:
+            quiet_coolers = [c for c in pool if any(kw in c.name.lower() for kw in ["noctua", "liquid", "freezer"])]
+            cooler = max(quiet_coolers, key=lambda c: (c.max_tdp_w, c.price_usd)) if quiet_coolers else max(pool, key=lambda c: (c.max_tdp_w, c.price_usd))
         else:
-            cooler = max(coolers, key=lambda c: c.max_tdp_w) if coolers else None
+            cooler = max(pool, key=lambda c: (c.max_tdp_w, c.price_usd))
     else:
         cooler = coolers[0] if coolers else None
 

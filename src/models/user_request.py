@@ -26,3 +26,10 @@ class UserRequirements(BaseModel):
         default_factory=list,
         description="Key priorities: maximum FPS, quiet operation, future upgradeability",
     )
+    budget_weights: Optional[dict[str, float]] = Field(
+        default=None,
+        description="Dynamic budget allocation fractions (e.g. {'gpu': 0.65, 'platform': 0.20, 'cooling': 0.08, 'case': 0.07})",
+    )
+    silence_focus: bool = Field(False, description="Whether silence/noise reduction is a primary priority")
+    prefer_liquid_cooler: bool = Field(False, description="Whether liquid AIO cooling is requested")
+    prefer_aesthetic_case: bool = Field(False, description="Whether a premium/showcase case is requested")
