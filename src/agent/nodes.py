@@ -38,16 +38,43 @@ def _is_ollama_endpoint() -> bool:
 def _get_llm() -> Optional[ChatOpenAI]:
     if OPENAI_API_KEY and len(OPENAI_API_KEY.strip()) >= 3:
         is_local = _is_ollama_endpoint()
+        extra_kwargs: Dict[str, Any] = {}
+        model_lower = OPENAI_MODEL.lower()
+        if not is_local and any(tag in model_lower for tag in ["gpt-oss", "o1", "o3", "o4"]):
+            extra_kwargs["reasoning_effort"] = "low"
         return ChatOpenAI(
             model=OPENAI_MODEL,
             api_key=OPENAI_API_KEY,
             base_url=OPENAI_BASE_URL,
             temperature=0.1,
-            max_tokens=350,
+            max_tokens=350 if is_local else 2048,
             max_retries=0 if is_local else 2,
             timeout=45.0 if is_local else 30.0,
+            **extra_kwargs,
         )
     return None
+
+
+_EXTRACTION_PROMPT = (
+    "Analyze the PC build request (in any language) and extract structured requirements as JSON with keys:\n"
+    "- budget_usd (integer in USD, default 1200)\n"
+    "- resolution (\"1080p\", \"1440p\", \"4k\", or null)\n"
+    "- target_games (list of real video game titles only, never software)\n"
+    "- work_tasks (list of work software/tasks like \"blender\", \"video editing\", \"programming\", \"office\")\n"
+    "- priorities (list of tags like \"ram_32gb\", \"storage_2000gb\", \"quiet\", \"apu\")\n"
+    "- budget_weights: object with fractions summing to 1.0:\n"
+    "    {\"gpu\": float, \"platform\": float, \"case\": float, \"cooler\": float, \"storage\": float}\n"
+    "    (Guidelines: normal gaming = gpu 0.52, platform 0.35, case 0.05, cooler 0.03, storage 0.05.\n"
+    "     If user asks for expensive GPU / cheap CPU: shift to gpu 0.70, platform 0.15.\n"
+    "     If user asks for expensive CPU / cheap GPU: shift to gpu 0.25, platform 0.60.\n"
+    "     If user asks for fancy case / aesthetics: increase case to 0.12 - 0.20.\n"
+    "     If user asks for liquid cooling / cool temps: increase cooler to 0.10 - 0.15.\n"
+    "     If user specifies custom percentages like 70% in GPU: follow user's exact allocation).\n"
+    "- prefer_liquid_cooler (boolean, true if liquid/water/aio cooling requested)\n"
+    "- prefer_aesthetic_case (boolean, true if cool/premium/aesthetic/rgb case requested)\n"
+    "- silence_focus (boolean, true if quiet/silent requested)\n"
+    "Resolution mapping: 2k/qhd -> \"1440p\", 4k/uhd -> \"4k\", 1080p/fhd -> \"1080p\".\n"
+)
 
 
 def _parse_via_ollama_native(query: str) -> Optional[UserRequirements]:
@@ -55,28 +82,7 @@ def _parse_via_ollama_native(query: str) -> Optional[UserRequirements]:
     try:
         base_host = re.sub(r"/v1/?$", "", OPENAI_BASE_URL)
         url = base_host.rstrip("/") + "/api/chat"
-        prompt = (
-            "Analyze the PC build request and extract structured requirements as JSON with keys:\n"
-            "- budget_usd (integer in USD, default 1200)\n"
-            "- resolution (\"1080p\", \"1440p\", \"4k\", or null)\n"
-            "- target_games (list of game titles)\n"
-            "- work_tasks (list of work software/tasks)\n"
-            "- priorities (list of tags)\n"
-            "- budget_weights: object with fractions summing to 1.0:\n"
-            "    {\"gpu\": float, \"platform\": float, \"case\": float, \"cooler\": float, \"storage\": float}\n"
-            "    (Guidelines: normal gaming = gpu 0.52, platform 0.35, case 0.05, cooler 0.03, storage 0.05.\n"
-            "     If user asks for expensive GPU / cheap CPU: shift to gpu 0.70, platform 0.15.\n"
-            "     If user asks for expensive CPU / cheap GPU: shift to gpu 0.25, platform 0.60.\n"
-            "     If user asks for fancy case / aesthetics: increase case to 0.12 - 0.20.\n"
-            "     If user asks for liquid cooling / cool temps: increase cooler to 0.10 - 0.15.\n"
-            "     If user specifies custom percentages like 70% in GPU: follow user's exact allocation).\n"
-            "- prefer_liquid_cooler (boolean, true if liquid/water/aio cooling requested)\n"
-            "- prefer_aesthetic_case (boolean, true if cool/premium/aesthetic/rgb case requested)\n"
-            "- silence_focus (boolean, true if quiet/silent requested)\n"
-            "Resolution mapping: 2k/qhd -> \"1440p\", 4k/uhd -> \"4k\", 1080p/fhd -> \"1080p\".\n"
-            f"User Request: {query}\n"
-            "Output JSON only."
-        )
+        prompt = f"{_EXTRACTION_PROMPT}User Request: {query}\nOutput JSON only."
         payload = {
             "model": OPENAI_MODEL,
             "messages": [{"role": "user", "content": prompt}],
@@ -295,6 +301,7 @@ def parse_requirements_node(state: AgentState) -> Dict[str, Any]:
 
     if llm:
         is_local = _is_ollama_endpoint()
+        llm_error: Optional[str] = None
 
         # 1. For local Ollama models on Mac, call native /api/chat with think=False (runs in ~3s instead of reasoning timeouts)
         if is_local:
@@ -302,18 +309,14 @@ def parse_requirements_node(state: AgentState) -> Dict[str, Any]:
             if requirements:
                 parser_source = f"Local LLM ({OPENAI_MODEL})"
 
-        # 2. Try structured output only for remote OpenAI/cloud APIs (Ollama MLX runner throws 501 on tools)
-        if not requirements and not is_local:
+        # 2. Try structured output only for remote OpenAI/cloud APIs that reliably support tool calling
+        is_groq = "groq.com" in OPENAI_BASE_URL.lower()
+        if not requirements and not is_local and not is_groq:
             try:
-                structured_llm = llm.with_structured_output(UserRequirements)
+                structured_llm = llm.with_structured_output(UserRequirements, method="function_calling")
                 system_prompt = (
-                    "You are an expert PC hardware consultant. Analyze the user request (which may be in any language) "
-                    "and extract structured requirements in English.\n"
-                    "Strict Rules:\n"
-                    "1. 'target_games': ONLY real video games (Cyberpunk, CS2, etc.). NEVER software like Blender or Video Editing here. If none, use [].\n"
-                    "2. 'resolution': Only set if user explicitly requested a gaming resolution (1080p, 1440p, 4k). Otherwise null.\n"
-                    "3. 'priorities': Include tags like 'ram_32gb', 'ram_64gb', 'storage_2000gb', 'quiet', 'apu' when requested.\n"
-                    "Infer budget in USD (default 1200)."
+                    "You are an expert PC hardware consultant.\n"
+                    f"{_EXTRACTION_PROMPT}"
                 )
                 res = structured_llm.invoke(
                     [SystemMessage(content=system_prompt), HumanMessage(content=user_query)]
@@ -321,26 +324,17 @@ def parse_requirements_node(state: AgentState) -> Dict[str, Any]:
                 if res and isinstance(res, UserRequirements):
                     requirements = res
                     parser_source = f"Remote LLM ({OPENAI_MODEL})"
-            except Exception:
-                pass
+            except Exception as exc:
+                llm_error = type(exc).__name__
+                print(f"[LLM Warning] Structured output failed: {exc}", flush=True)
 
         # 3. Direct JSON prompt fallback
         if not requirements:
             try:
                 prompt = (
-                    "You are an expert PC hardware parser. Analyze the user request (in any language) "
-                    "and output ONLY a single valid JSON object matching this schema, with NO extra words, explanations, or markdown fences:\n"
-                    "{\n"
-                    '  "budget_usd": integer,\n'
-                    '  "resolution": "1080p" or "1440p" or "4k" or null,\n'
-                    '  "target_games": [list of video games],\n'
-                    '  "work_tasks": [list of tasks like "blender", "video editing", "programming", "office"],\n'
-                    '  "priorities": [tags like "ram_32gb", "storage_2000gb", "quiet", "apu"]\n'
-                    "}\n"
-                    "Rules for resolution:\n"
-                    "- 2k, 1440p, qhd -> \"1440p\"\n"
-                    "- 4k, 2160p, uhd -> \"4k\"\n"
-                    "- 1080p, fhd -> \"1080p\"\n"
+                    "You are an expert PC hardware parser. Output ONLY a single valid JSON object "
+                    "with NO extra words, explanations, or markdown fences.\n"
+                    f"{_EXTRACTION_PROMPT}"
                     "Start your response immediately with '{' and output strictly raw JSON."
                 )
                 resp = llm.invoke([SystemMessage(content=prompt), HumanMessage(content=user_query)])
@@ -352,9 +346,16 @@ def parse_requirements_node(state: AgentState) -> Dict[str, Any]:
                 if m:
                     data = json.loads(m.group(0))
                     requirements = UserRequirements.model_validate(data)
-                    parser_source = f"Local LLM ({OPENAI_MODEL})"
-            except Exception:
-                pass
+                    parser_source = f"{'Local' if is_local else 'Remote'} LLM ({OPENAI_MODEL})"
+                else:
+                    llm_error = "EmptyOrInvalidJSON"
+                    print(f"[LLM Warning] JSON fallback returned non-JSON: {content[:200]!r}", flush=True)
+            except Exception as exc:
+                llm_error = type(exc).__name__
+                print(f"[LLM Warning] JSON fallback failed: {exc}", flush=True)
+
+        if not requirements and llm_error:
+            parser_source = f"Deterministic Heuristic Engine (LLM fallback: {llm_error})"
 
     if not requirements:
         requirements = _heuristic_parse_requirements(user_query)

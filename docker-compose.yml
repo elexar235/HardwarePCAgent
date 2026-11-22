@@ -1,16 +1,10 @@
 services:
   pc-builder-agent:
-    build:
-      context: .
-      args:
-        OLLAMA_MODEL: qwen3.5:4b
+    build: .
     image: hardware-pc-agent:latest
     container_name: hardware-pc-agent
     ports:
       - "8000:8000"
-    environment:
-      - OPENAI_MODEL=qwen3.5:4b
-      - OPENAI_BASE_URL=http://localhost:11434/v1
-      - OPENAI_API_KEY=ollama
-      - LANGCHAIN_TRACING_V2=false
+    env_file:
+      - .env
     restart: unless-stopped
